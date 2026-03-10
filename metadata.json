@@ -1,0 +1,5 @@
+{
+  "name": "Procedural World Generator",
+  "description": "A real-time WebGL procedural planet generator with customizable terrain, oceans, clouds, and biomes.",
+  "requestFramePermissions": []
+}
