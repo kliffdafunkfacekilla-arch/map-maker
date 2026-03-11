@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 
 // --- JS Math Utils for Raycasting & Biome Sampling ---
@@ -82,22 +82,22 @@ function sphIntersect(ro: number[], rd: number[], ce: number[], ra: number) {
 
 function getBiome(h: number, temp: number, moist: number, waterLevel: number) {
   if (h < waterLevel) {
-    if (temp < -0.2) return { name: 'Frozen Ocean', description: 'Thick ice sheets covering deep waters.' };
-    if (h < waterLevel - 0.2) return { name: 'Deep Ocean', description: 'Abyssal depths largely unexplored.' };
-    return { name: 'Coastal Waters', description: 'Shallow, life-rich marine environments.' };
+    if (temp < -0.2) return { name: 'Frozen Ocean', description: 'Thick ice sheets covering deep waters.', resource: 'food' };
+    if (h < waterLevel - 0.2) return { name: 'Deep Ocean', description: 'Abyssal depths largely unexplored.', resource: 'food' };
+    return { name: 'Coastal Waters', description: 'Shallow, life-rich marine environments.', resource: 'food' };
   }
   
-  if (temp < -0.3) return { name: 'Glacial Wasteland', description: 'Barren ice and snow as far as the eye can see.' };
+  if (temp < -0.3) return { name: 'Glacial Wasteland', description: 'Barren ice and snow as far as the eye can see.', resource: 'stone' };
   if (temp > 0.4) {
-    if (moist < -0.2) return { name: 'Scorched Desert', description: 'Arid, cracked earth with extreme temperatures.' };
-    if (moist > 0.4) return { name: 'Primordial Jungle', description: 'Dense, overgrown rainforest teeming with life.' };
-    return { name: 'Savanna', description: 'Dry grasslands with scattered resilient trees.' };
+    if (moist < -0.2) return { name: 'Scorched Desert', description: 'Arid, cracked earth with extreme temperatures.', resource: 'stone' };
+    if (moist > 0.4) return { name: 'Primordial Jungle', description: 'Dense, overgrown rainforest teeming with life.', resource: 'wood' };
+    return { name: 'Savanna', description: 'Dry grasslands with scattered resilient trees.', resource: 'fiber' };
   }
   
-  if (moist < -0.3) return { name: 'Rocky Steppe', description: 'Harsh, rocky terrain with sparse vegetation.' };
-  if (moist > 0.3) return { name: 'Temperate Forest', description: 'Lush woodlands with diverse flora and fauna.' };
+  if (moist < -0.3) return { name: 'Rocky Steppe', description: 'Harsh, rocky terrain with sparse vegetation.', resource: 'stone' };
+  if (moist > 0.3) return { name: 'Temperate Forest', description: 'Lush woodlands with diverse flora and fauna.', resource: 'wood' };
   
-  return { name: 'Plains', description: 'Vast, rolling grasslands suitable for agriculture.' };
+  return { name: 'Plains', description: 'Vast, rolling grasslands suitable for agriculture.', resource: 'food' };
 }
 
 function generateHistory(biome: string, seed: number, px: number, py: number, pz: number) {
@@ -164,7 +164,11 @@ export default function App() {
     habitat: 'land',
     color: '#ff0000',
     prefTemp: 0,
-    prefMoist: 0
+    prefMoist: 0,
+    diet: 'herbivore',
+    biome: 'any',
+    role: 'prey',
+    resourceYield: 'meat'
   });
 
   const [newCiv, setNewCiv] = useState({
@@ -172,11 +176,31 @@ export default function App() {
     color: '#00ffff',
     aggression: 0.5,
     greed: 0.5,
-    favResource: 'wood'
+    favResource: 'wood',
+    farming: false,
+    hunting: false,
+    taming: false
   });
 
   useEffect(() => {
-    (window as any)._simulation = { species: [], entities: [], civs: [], settlements: [], units: [], chaosNodes: [], mutants: [] };
+    (window as any)._simulation = { 
+      species: [], 
+      entities: [], 
+      civs: [], 
+      settlements: [], 
+      units: [], 
+      chaosNodes: [], 
+      mutants: [],
+      globalHarvest: 0,
+      lastSyncTime: Date.now()
+    };
+
+    const handleClimateAltered = (e: any) => {
+      setTemperature(e.detail.temp);
+      setMoisture(e.detail.moist);
+    };
+    window.addEventListener('climateAltered', handleClimateAltered);
+    return () => window.removeEventListener('climateAltered', handleClimateAltered);
   }, []);
 
   const unleashChaos = () => {
@@ -384,7 +408,7 @@ export default function App() {
         return pow(n, 3.0);
       }
 
-      vec3 getTerrainColor(float h, vec3 p, out float roughness, float currentTemp, float currentMoist) {
+      vec3 getTerrainColor(float h, vec3 pSample, vec3 pSphere, out float roughness, float currentTemp, float currentMoist) {
         vec3 waterDeep = vec3(0.02, 0.1, 0.3);
         vec3 waterShallow = vec3(0.05, 0.3, 0.5);
         vec3 sand = vec3(0.8, 0.7, 0.5);
@@ -405,7 +429,7 @@ export default function App() {
           float freeze = smoothstep(-0.2, -0.6, currentTemp);
           
           if (freeze > 0.0) {
-            float iceTex = iceTexture(p);
+            float iceTex = iceTexture(pSample);
             vec3 iceCol = mix(ice, snow, iceTex);
             roughness = mix(0.1, 0.5, freeze);
             return mix(wCol, iceCol, freeze);
@@ -417,40 +441,40 @@ export default function App() {
         
         float l = clamp((h - u_waterLevel) / (1.0 - u_waterLevel), 0.0, 1.0);
         
-        float latTemp = 1.0 - abs(p.y);
+        float latTemp = 1.0 - abs(pSphere.y);
         float temp = currentTemp + latTemp * 0.5 - l * 0.8;
-        float moist = currentMoist + (1.0 - abs(p.y)) * 0.3 + l * 0.2;
+        float moist = currentMoist + (1.0 - abs(pSphere.y)) * 0.3 + l * 0.2;
         
         vec3 color = grass;
         
         if (temp < -0.3) {
-          float iceTex = iceTexture(p);
+          float iceTex = iceTexture(pSample);
           color = mix(rock, mix(ice, snow, iceTex), smoothstep(-0.3, -0.6, temp));
           roughness = 0.6;
         } else if (temp > 0.4) {
           if (moist < -0.2) {
-            float crack = crackedEarth(p);
+            float crack = crackedEarth(pSample);
             color = mix(desert, scorched, crack);
             roughness = 0.9;
           } else if (moist > 0.4) {
-            float canopy = canopyTexture(p);
+            float canopy = canopyTexture(pSample);
             // Vegetation density based on moisture and temp
             float vegDensity = smoothstep(0.4, 1.0, moist) * smoothstep(0.4, 1.0, temp);
             vec3 denseJungle = vec3(0.01, 0.1, 0.02);
             color = mix(forest, mix(jungle, denseJungle, vegDensity), canopy);
             roughness = 0.95;
           } else {
-            float dune = duneTexture(p);
+            float dune = duneTexture(pSample);
             color = mix(sand, grass, smoothstep(-0.2, 0.4, moist) * dune);
             roughness = 0.85;
           }
         } else {
           if (moist < -0.3) {
-            float rockTex = rockTexture(p);
+            float rockTex = rockTexture(pSample);
             color = mix(grass, mix(rock, darkRock, rockTex), smoothstep(-0.3, -0.6, moist));
             roughness = 0.8;
           } else if (moist > 0.3) {
-            float canopy = canopyTexture(p * 0.5);
+            float canopy = canopyTexture(pSample * 0.5);
             float vegDensity = smoothstep(0.3, 0.8, moist);
             vec3 denseForest = vec3(0.03, 0.2, 0.08);
             color = mix(grass, mix(forest, denseForest, vegDensity), canopy);
@@ -462,20 +486,20 @@ export default function App() {
         }
         
         if (l > 0.6) {
-          float rockTex = rockTexture(p);
+          float rockTex = rockTexture(pSample);
           vec3 mountainCol = mix(rock, darkRock, rockTex);
           color = mix(color, mountainCol, smoothstep(0.6, 0.75, l));
           roughness = 0.85;
         }
         if (l > 0.8) {
-          float iceTex = iceTexture(p);
+          float iceTex = iceTexture(pSample);
           vec3 peakCol = mix(snow, ice, iceTex * 0.5);
           color = mix(color, peakCol, smoothstep(0.8, 0.9, l));
           roughness = 0.7;
         }
         
         if (l < 0.05 && temp > -0.3) {
-          float dune = duneTexture(p * 2.0);
+          float dune = duneTexture(pSample * 2.0);
           color = mix(mix(sand, vec3(0.9, 0.8, 0.6), dune), color, smoothstep(0.0, 0.05, l));
           roughness = 0.75;
         }
@@ -528,7 +552,7 @@ export default function App() {
           
           float h = fbm(pSample * u_terrainScale) * u_elevation;
           float roughness;
-          vec3 albedo = getTerrainColor(h, pSample, roughness, currentTemp, currentMoist);
+          vec3 albedo = getTerrainColor(h, pSample, p, roughness, currentTemp, currentMoist);
           
           // Normal mapping
           vec2 e = vec2(0.005, 0.0);
@@ -653,8 +677,12 @@ export default function App() {
         rd.xz *= rot(yaw);
 
         // Starfield
-        float stars = pow(hash(vec3(rd.xy * 100.0, 1.0)), 100.0) * 2.0;
-        col += vec3(stars);
+        vec3 starDir = rd * 150.0;
+        vec3 starCell = floor(starDir);
+        vec3 starFract = fract(starDir);
+        float starHash = hash(starCell);
+        float star = smoothstep(0.95, 1.0, starHash) * smoothstep(0.5, 0.0, length(starFract - 0.5));
+        col += vec3(star * 2.0);
 
         vec2 t = sphIntersect(ro, rd, vec3(0.0), 1.0);
         
@@ -670,7 +698,7 @@ export default function App() {
           float h = fbm(pSample * u_terrainScale) * u_elevation;
           
           float roughness;
-          vec3 albedo = getTerrainColor(h, pSample, roughness, currentTemp, currentMoist);
+          vec3 albedo = getTerrainColor(h, pSample, pRot, roughness, currentTemp, currentMoist);
           
           vec2 e = vec2(0.005, 0.0);
           float hx = fbm(normalize(pSample + e.xyy) * u_terrainScale) * u_elevation;
@@ -863,6 +891,8 @@ export default function App() {
       projection: gl.getUniformLocation(program, 'u_projection'),
       dynamicWeather: gl.getUniformLocation(program, 'u_dynamicWeather'),
       showEcosystem: gl.getUniformLocation(program, 'u_showEcosystem'),
+      chaosActive: gl.getUniformLocation(program, 'u_chaosActive'),
+      chaosPoints: gl.getUniformLocation(program, 'u_chaosPoints'),
     };
 
     let isDragging = false;
@@ -1010,7 +1040,7 @@ export default function App() {
               currentMoist = Math.max(-1.0, Math.min(1.0, currentMoist));
             }
             
-            if (!getVal('_shaderPaused', false)) {
+            if (!getVal('_shaderPaused', 0.0)) {
               // --- Chaos Simulation ---
               const isChaos = getVal('_shaderChaosActive', 0.0) > 0.5;
               if (isChaos && sim.chaosNodes) {
@@ -1094,19 +1124,73 @@ export default function App() {
                 let isLand = hVal >= waterLevel;
                 let wrongHabitat = (sp.habitat === 'land' && !isLand) || (sp.habitat === 'ocean' && isLand);
                 
+                let biomeObj = getBiome(hVal, localTemp, localMoist, waterLevel);
+                let biomeName = biomeObj.name.toLowerCase();
+                let wrongBiome = false;
+                if (sp.biome && sp.biome !== 'any') {
+                  if (sp.biome === 'forest' && !biomeName.includes('forest') && !biomeName.includes('jungle')) wrongBiome = true;
+                  if (sp.biome === 'desert' && !biomeName.includes('desert') && !biomeName.includes('steppe')) wrongBiome = true;
+                  if (sp.biome === 'tundra' && !biomeName.includes('wasteland') && !biomeName.includes('frozen')) wrongBiome = true;
+                  if (sp.biome === 'grassland' && !biomeName.includes('plains') && !biomeName.includes('savanna')) wrongBiome = true;
+                  if (sp.biome === 'ocean' && !biomeName.includes('ocean') && !biomeName.includes('waters')) wrongBiome = true;
+                }
+                
                 let tempDiff = Math.abs(localTemp - sp.prefTemp);
                 let moistDiff = Math.abs(localMoist - sp.prefMoist);
                 let happiness = 1.0 - (tempDiff + moistDiff) * 0.5;
                 if (wrongHabitat) happiness -= 1.0;
+                if (wrongBiome) happiness -= 0.5;
                 
+                // Base health recovery
                 if (happiness > 0.5) {
                   e.health = Math.min(1.0, e.health + dt * 0.1);
-                  e.energy += dt * (happiness - 0.5) * 0.5;
                 } else {
                   e.health -= dt * (0.5 - happiness) * 0.5;
                 }
                 
-                if (e.health <= 0) {
+                // Energy gain based on diet and biome
+                if (wrongBiome) {
+                  e.energy -= dt * 0.1; // No food in wrong biome
+                } else {
+                  if (sp.type === 'plant') {
+                    // Plants get energy from the biome directly
+                    e.energy += dt * (happiness - 0.5) * 0.5;
+                  } else if (sp.type === 'animal') {
+                    // Animals need to find food
+                    let foundFood = false;
+                    for (let j = sim.entities.length - 1; j >= 0; j--) {
+                      if (i === j) continue;
+                      let target = sim.entities[j];
+                      let targetSp = sim.species.find((s: any) => s.id === target.speciesId);
+                      if (!targetSp) continue;
+                      
+                      let dist = Math.sqrt(Math.pow(e.lat - target.lat, 2) + Math.pow(e.lon - target.lon, 2));
+                      if (dist < 0.05) {
+                        if (sp.diet === 'herbivore' && targetSp.type === 'plant') {
+                          foundFood = true;
+                          target.health -= dt * 0.2; // Eat plant
+                          e.energy += dt * 0.5;
+                          break;
+                        } else if (sp.diet === 'carnivore' && targetSp.type === 'animal' && targetSp.role === 'prey') {
+                          foundFood = true;
+                          target.health -= dt * 1.0; // Hunt prey
+                          e.energy += dt * 1.0;
+                          break;
+                        } else if (sp.diet === 'omnivore' && (targetSp.type === 'plant' || (targetSp.type === 'animal' && targetSp.role === 'prey'))) {
+                          foundFood = true;
+                          target.health -= dt * 0.5;
+                          e.energy += dt * 0.8;
+                          break;
+                        }
+                      }
+                    }
+                    if (!foundFood) {
+                      e.energy -= dt * 0.05; // Starving
+                    }
+                  }
+                }
+                
+                if (e.health <= 0 || e.energy <= -1.0) {
                   sim.entities.splice(i, 1);
                   continue;
                 }
@@ -1115,6 +1199,23 @@ export default function App() {
                   e.lat += (Math.random() - 0.5) * dt * 0.2;
                   e.lon += (Math.random() - 0.5) * dt * 0.2;
                   e.lat = Math.max(-Math.PI/2, Math.min(Math.PI/2, e.lat));
+                  
+                  if (sp.role === 'predator') {
+                    for (let s of sim.settlements) {
+                      let dist = Math.sqrt(Math.pow(s.lat - e.lat, 2) + Math.pow(s.lon - e.lon, 2));
+                      if (dist < 0.05) {
+                        s.population -= dt * 2;
+                        e.energy += dt * 0.5;
+                      }
+                    }
+                    for (let u of sim.units) {
+                      let dist = Math.sqrt(Math.pow(u.lat - e.lat, 2) + Math.pow(u.lon - e.lon, 2));
+                      if (dist < 0.02) {
+                        u.health -= dt * 5;
+                        e.energy += dt * 0.5;
+                      }
+                    }
+                  }
                 }
                 
                 if (e.energy > 1.0 && sim.entities.length < 1000) {
@@ -1164,7 +1265,56 @@ export default function App() {
                 }
                 
                 // Gather resources
-                s.resources += dt * 5 * s.level;
+                let baseGather = dt * 5 * s.level;
+                let extraResources = 0;
+                
+                let pSampleX = px + seed;
+                let pSampleY = py + seed * 1.3;
+                let pSampleZ = pz - seed * 0.8;
+                let hVal = fbm(pSampleX * terrainScale, pSampleY * terrainScale, pSampleZ * terrainScale) * elevation;
+                let l = Math.max(0.0, Math.min(1.0, (hVal - waterLevel) / (1.0 - waterLevel)));
+                let latTemp = 1.0 - Math.abs(py);
+                let localTemp = currentTemp + latTemp * 0.5 - l * 0.8;
+                let localMoist = currentMoist + (1.0 - Math.abs(py)) * 0.3 + l * 0.2;
+                let biomeObj = getBiome(hVal, localTemp, localMoist, waterLevel);
+                
+                // Biome base resource
+                if (civ.farming) {
+                  let yieldMultiplier = biomeObj.resource === civ.favResource ? 2.0 : 1.0;
+                  extraResources += dt * 2 * s.level * yieldMultiplier; // Base farming yield from biome
+                }
+                
+                // Interact with entities (plants/animals)
+                for (let j = sim.entities.length - 1; j >= 0; j--) {
+                  let e = sim.entities[j];
+                  let sp = sim.species.find((spc: any) => spc.id === e.speciesId);
+                  if (!sp) continue;
+                  
+                  let dist = Math.sqrt(Math.pow(s.lat - e.lat, 2) + Math.pow(s.lon - e.lon, 2));
+                  if (dist < 0.1) { // Within settlement range
+                    if (civ.farming && sp.type === 'plant') {
+                      let yieldMultiplier = sp.resourceYield === civ.favResource ? 2.0 : 1.0;
+                      extraResources += dt * 5 * yieldMultiplier;
+                      e.health -= dt * 0.5; // Harvesting damages plant
+                    }
+                    if (civ.hunting && sp.type === 'animal' && sp.role === 'prey') {
+                      let yieldMultiplier = sp.resourceYield === civ.favResource ? 2.0 : 1.0;
+                      extraResources += dt * 10 * yieldMultiplier;
+                      e.health -= dt * 1.0; // Hunting damages animal
+                    }
+                    if (civ.taming && sp.type === 'animal') {
+                      s.defense += dt * 0.5; // Tamed animals add defense
+                      e.energy += dt * 0.1; // Tamed animals get fed
+                    }
+                  }
+                }
+                
+                s.resources += baseGather + extraResources;
+                
+                // Climate Alteration from excessive harvesting
+                if (s.level >= 3 && extraResources > dt * 10) {
+                  sim.globalHarvest += extraResources * dt;
+                }
                 
                 // Grow population
                 if (s.resources > s.population * 2) {
@@ -1228,6 +1378,21 @@ export default function App() {
                       health: 10.0
                     });
                     continue;
+                  }
+                }
+                
+                // Unit interactions with wildlife
+                for (let j = sim.entities.length - 1; j >= 0; j--) {
+                  let e = sim.entities[j];
+                  let sp = sim.species.find((spc: any) => spc.id === e.speciesId);
+                  if (!sp) continue;
+                  
+                  let dist = Math.sqrt(Math.pow(u.lat - e.lat, 2) + Math.pow(u.lon - e.lon, 2));
+                  if (dist < 0.05) {
+                    if (civ.hunting && sp.type === 'animal' && sp.role === 'prey') {
+                      u.payload += dt * 5;
+                      e.health -= dt * 2.0;
+                    }
                   }
                 }
                 
@@ -1333,42 +1498,26 @@ export default function App() {
                   m.lat = Math.max(-Math.PI/2, Math.min(Math.PI/2, m.lat));
                 }
               }
-              
-              // --- Mutant Simulation ---
-              if (isChaos && sim.mutants) {
-                for (let i = sim.mutants.length - 1; i >= 0; i--) {
-                  let m = sim.mutants[i];
-                  m.health -= dt * 0.05;
-                  if (m.health <= 0) { sim.mutants.splice(i, 1); continue; }
-                  
-                  let nearestS = null;
-                  let minDist = Infinity;
-                  for (let s of sim.settlements) {
-                    let dLat = s.lat - m.lat;
-                    let dLon = s.lon - m.lon;
-                    let dist = dLat*dLat + dLon*dLon;
-                    if (dist < minDist) { minDist = dist; nearestS = s; }
-                  }
-                  if (nearestS && minDist < 0.5) {
-                    let dLat = nearestS.lat - m.lat;
-                    let dLon = nearestS.lon - m.lon;
-                    let dist = Math.sqrt(minDist);
-                    if (dist < 0.05) {
-                      nearestS.defense -= dt * 10;
-                      nearestS.population -= dt * 5;
-                      m.health += dt * 1;
-                      if (nearestS.defense <= 0 && nearestS.population <= 0) {
-                        sim.settlements = sim.settlements.filter((s:any) => s.id !== nearestS.id);
-                      }
-                    } else {
-                      m.lat += (dLat/dist) * dt * 0.2;
-                      m.lon += (dLon/dist) * dt * 0.2;
-                    }
-                  } else {
-                    m.lat += (Math.random() - 0.5) * dt * 0.5;
-                    m.lon += (Math.random() - 0.5) * dt * 0.5;
-                  }
-                  m.lat = Math.max(-Math.PI/2, Math.min(Math.PI/2, m.lat));
+              // --- Sync Global Climate Alteration ---
+              if (sim.globalHarvest > 100) {
+                let tempIncrease = 0.01;
+                let moistDecrease = 0.01;
+                sim.globalHarvest = 0;
+                
+                let currentTemp = getVal('_shaderTemperature', 0.0);
+                let currentMoist = getVal('_shaderMoisture', 0.0);
+                
+                let newTemp = Math.min(1.0, currentTemp + tempIncrease);
+                let newMoist = Math.max(-1.0, currentMoist - moistDecrease);
+                
+                (window as any)._shaderTemperature = newTemp;
+                (window as any)._shaderMoisture = newMoist;
+                
+                // Sync back to React state occasionally to update UI sliders
+                if (Date.now() - sim.lastSyncTime > 2000) {
+                  sim.lastSyncTime = Date.now();
+                  // We dispatch a custom event to update the React state without causing infinite loops
+                  window.dispatchEvent(new CustomEvent('climateAltered', { detail: { temp: newTemp, moist: newMoist } }));
                 }
               }
             }
@@ -1413,7 +1562,7 @@ export default function App() {
                 let vz2 = vy * -sP_pos + vz * cP_pos;
                 vy = vy2; vz = vz2;
                 
-                if (vz < 0) {
+                if (vz < -0.001) {
                   let uvx = vx / -vz;
                   let uvy = vy / -vz;
                   let screenX = uvx * overlay.height + 0.5 * overlay.width;
@@ -1423,7 +1572,7 @@ export default function App() {
                   let dx = worldX - ro_x, dy = worldY - ro_y, dz = worldZ - ro_z;
                   let dot = nx * dx + ny * dy + nz * dz;
                   
-                  if (dot <= 0) {
+                  if (dot <= 0 && isFinite(screenX) && isFinite(screenY)) {
                     pos = { x: screenX, y: overlay.height - screenY };
                   }
                 }
@@ -1487,7 +1636,7 @@ export default function App() {
                 let vz2 = vy * -sP_pos + vz * cP_pos;
                 vy = vy2; vz = vz2;
                 
-                if (vz < 0) {
+                if (vz < -0.001) {
                   let uvx = vx / -vz;
                   let uvy = vy / -vz;
                   let screenX = uvx * overlay.height + 0.5 * overlay.width;
@@ -1497,7 +1646,7 @@ export default function App() {
                   let dx = worldX - ro_x, dy = worldY - ro_y, dz = worldZ - ro_z;
                   let dot = nx * dx + ny * dy + nz * dz;
                   
-                  if (dot <= 0) {
+                  if (dot <= 0 && isFinite(screenX) && isFinite(screenY)) {
                     return { x: screenX, y: overlay.height - screenY };
                   }
                 }
@@ -2055,6 +2204,61 @@ export default function App() {
                                 </select>
                               </div>
                             </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Diet</label>
+                                <select 
+                                  value={newSpecies.diet} onChange={e => setNewSpecies({...newSpecies, diet: e.target.value as any})}
+                                  className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs font-mono text-white focus:outline-none focus:border-white/30 appearance-none"
+                                >
+                                  <option value="herbivore">Herbivore</option>
+                                  <option value="carnivore">Carnivore</option>
+                                  <option value="omnivore">Omnivore</option>
+                                  <option value="photosynthesis">Photosynthesis</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Biome</label>
+                                <select 
+                                  value={newSpecies.biome} onChange={e => setNewSpecies({...newSpecies, biome: e.target.value as any})}
+                                  className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs font-mono text-white focus:outline-none focus:border-white/30 appearance-none"
+                                >
+                                  <option value="any">Any</option>
+                                  <option value="forest">Forest</option>
+                                  <option value="desert">Desert</option>
+                                  <option value="tundra">Tundra</option>
+                                  <option value="grassland">Grassland</option>
+                                  <option value="ocean">Ocean</option>
+                                </select>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Role</label>
+                                <select 
+                                  value={newSpecies.role} onChange={e => setNewSpecies({...newSpecies, role: e.target.value as any})}
+                                  className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs font-mono text-white focus:outline-none focus:border-white/30 appearance-none"
+                                >
+                                  <option value="prey">Prey</option>
+                                  <option value="predator">Predator</option>
+                                  <option value="producer">Producer</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Yields</label>
+                                <select 
+                                  value={newSpecies.resourceYield} onChange={e => setNewSpecies({...newSpecies, resourceYield: e.target.value as any})}
+                                  className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs font-mono text-white focus:outline-none focus:border-white/30 appearance-none"
+                                >
+                                  <option value="meat">Meat</option>
+                                  <option value="wood">Wood</option>
+                                  <option value="fiber">Fiber</option>
+                                  <option value="fruit">Fruit</option>
+                                </select>
+                              </div>
+                            </div>
                             
                             <div>
                               <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Color</label>
@@ -2150,8 +2354,26 @@ export default function App() {
                                   <option value="stone">Stone</option>
                                   <option value="gold">Gold</option>
                                   <option value="food">Food</option>
+                                  <option value="meat">Meat</option>
+                                  <option value="fiber">Fiber</option>
+                                  <option value="fruit">Fruit</option>
                                 </select>
                               </div>
+                            </div>
+
+                            <div className="space-y-2">
+                              <label className="flex items-center space-x-2 text-[9px] font-mono text-white/80 uppercase cursor-pointer">
+                                <input type="checkbox" checked={newCiv.farming} onChange={e => setNewCiv({...newCiv, farming: e.target.checked})} className="accent-white/60" />
+                                <span>Farming (Harvest Plants)</span>
+                              </label>
+                              <label className="flex items-center space-x-2 text-[9px] font-mono text-white/80 uppercase cursor-pointer">
+                                <input type="checkbox" checked={newCiv.hunting} onChange={e => setNewCiv({...newCiv, hunting: e.target.checked})} className="accent-white/60" />
+                                <span>Hunting (Hunt Prey)</span>
+                              </label>
+                              <label className="flex items-center space-x-2 text-[9px] font-mono text-white/80 uppercase cursor-pointer">
+                                <input type="checkbox" checked={newCiv.taming} onChange={e => setNewCiv({...newCiv, taming: e.target.checked})} className="accent-white/60" />
+                                <span>Taming (Tame Animals)</span>
+                              </label>
                             </div>
                             
                             <div className="space-y-2">
