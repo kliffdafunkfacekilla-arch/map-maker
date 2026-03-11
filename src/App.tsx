@@ -6,8 +6,122 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 
+// --- JS Math Utils for Raycasting & Biome Sampling ---
+function fract(x: number) { return x - Math.floor(x); }
+
+function hash(x: number, y: number, z: number) {
+  let px = x * 123.34; px = px - Math.floor(px);
+  let py = y * 456.21; py = py - Math.floor(py);
+  let pz = z * 789.18; pz = pz - Math.floor(pz);
+  
+  let dotVal = px * (py + 19.19) + py * (pz + 19.19) + pz * (px + 19.19);
+  px += dotVal;
+  py += dotVal;
+  pz += dotVal;
+  
+  let res = (px + py) * pz;
+  return res - Math.floor(res);
+}
+
+function mix(x: number, y: number, a: number) {
+  return x * (1 - a) + y * a;
+}
+
+function noise(x: number, y: number, z: number) {
+  let ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+  let fx = x - ix, fy = y - iy, fz = z - iz;
+  
+  let ux = fx * fx * (3.0 - 2.0 * fx);
+  let uy = fy * fy * (3.0 - 2.0 * fy);
+  let uz = fz * fz * (3.0 - 2.0 * fz);
+  
+  let n000 = hash(ix, iy, iz);
+  let n100 = hash(ix + 1, iy, iz);
+  let n010 = hash(ix, iy + 1, iz);
+  let n110 = hash(ix + 1, iy + 1, iz);
+  let n001 = hash(ix, iy, iz + 1);
+  let n101 = hash(ix + 1, iy, iz + 1);
+  let n011 = hash(ix, iy + 1, iz + 1);
+  let n111 = hash(ix + 1, iy + 1, iz + 1);
+  
+  return mix(
+    mix(mix(n000, n100, ux), mix(n010, n110, ux), uy),
+    mix(mix(n001, n101, ux), mix(n011, n111, ux), uy),
+    uz
+  );
+}
+
+function fbm(x: number, y: number, z: number) {
+  let v = 0.0;
+  let a = 0.5;
+  let px = x, py = y, pz = z;
+  for (let i = 0; i < 6; ++i) {
+    v += a * noise(px, py, pz);
+    px = px * 2.0 + 100.0;
+    py = py * 2.0 + 100.0;
+    pz = pz * 2.0 + 100.0;
+    a *= 0.5;
+  }
+  return v;
+}
+
+function normalize(v: number[]) {
+  let len = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+  return [v[0]/len, v[1]/len, v[2]/len];
+}
+
+function sphIntersect(ro: number[], rd: number[], ce: number[], ra: number) {
+  let oc = [ro[0]-ce[0], ro[1]-ce[1], ro[2]-ce[2]];
+  let b = oc[0]*rd[0] + oc[1]*rd[1] + oc[2]*rd[2];
+  let c = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - ra*ra;
+  let h = b*b - c;
+  if (h < 0.0) return -1.0;
+  h = Math.sqrt(h);
+  return -b - h;
+}
+
+function getBiome(h: number, temp: number, moist: number, waterLevel: number) {
+  if (h < waterLevel) {
+    if (temp < -0.2) return { name: 'Frozen Ocean', description: 'Thick ice sheets covering deep waters.' };
+    if (h < waterLevel - 0.2) return { name: 'Deep Ocean', description: 'Abyssal depths largely unexplored.' };
+    return { name: 'Coastal Waters', description: 'Shallow, life-rich marine environments.' };
+  }
+  
+  if (temp < -0.3) return { name: 'Glacial Wasteland', description: 'Barren ice and snow as far as the eye can see.' };
+  if (temp > 0.4) {
+    if (moist < -0.2) return { name: 'Scorched Desert', description: 'Arid, cracked earth with extreme temperatures.' };
+    if (moist > 0.4) return { name: 'Primordial Jungle', description: 'Dense, overgrown rainforest teeming with life.' };
+    return { name: 'Savanna', description: 'Dry grasslands with scattered resilient trees.' };
+  }
+  
+  if (moist < -0.3) return { name: 'Rocky Steppe', description: 'Harsh, rocky terrain with sparse vegetation.' };
+  if (moist > 0.3) return { name: 'Temperate Forest', description: 'Lush woodlands with diverse flora and fauna.' };
+  
+  return { name: 'Plains', description: 'Vast, rolling grasslands suitable for agriculture.' };
+}
+
+function generateHistory(biome: string, seed: number, px: number, py: number, pz: number) {
+  const events = [
+    "Site of the ancient battle of the First Era.",
+    "Ruins of a forgotten civilization lie buried here.",
+    "A massive meteor struck this region millennia ago.",
+    "Legends speak of a mythical creature dwelling here.",
+    "Once the capital of a prosperous global empire.",
+    "An anomaly in the magnetic field was recorded here.",
+    "First landing site of the celestial voyagers.",
+    "A great cataclysm reshaped this land.",
+    "Known for its rare and magical flora.",
+    "A sacred pilgrimage site for nomadic tribes."
+  ];
+  
+  let h = hash(px * 10 + seed, py * 10 + seed, pz * 10 + seed);
+  let index = Math.floor(h * events.length);
+  return events[index];
+}
+
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLCanvasElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   
   // --- World Generation Parameters ---
@@ -21,6 +135,8 @@ export default function App() {
   const [moisture, setMoisture] = useState(0.0);
   const [cloudCover, setCloudCover] = useState(0.5);
   const [atmosphere, setAtmosphere] = useState(1.0);
+  const [dynamicWeather, setDynamicWeather] = useState(false);
+  const [showEcosystem, setShowEcosystem] = useState(true);
 
   // --- View & Camera Parameters ---
   const [projection, setProjection] = useState<'globe' | 'map'>('globe');
@@ -32,8 +148,75 @@ export default function App() {
 
   // --- UI State ---
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [activeTab, setActiveTab] = useState<'presets' | 'world' | 'climate' | 'view'>('presets');
+  const [activeTab, setActiveTab] = useState<'presets' | 'world' | 'climate' | 'life' | 'civ' | 'view'>('presets');
   const [audioStarted, setAudioStarted] = useState(false);
+  const [selectedRegion, setSelectedRegion] = useState<any>(null);
+  const startTimeRef = useRef(Date.now());
+
+  const [speciesList, setSpeciesList] = useState<any[]>([]);
+  const [civList, setCivList] = useState<any[]>([]);
+  
+  const [newSpecies, setNewSpecies] = useState({
+    name: 'New Species',
+    type: 'animal',
+    habitat: 'land',
+    color: '#ff0000',
+    prefTemp: 0,
+    prefMoist: 0
+  });
+
+  const [newCiv, setNewCiv] = useState({
+    name: 'New Civilization',
+    color: '#00ffff',
+    aggression: 0.5,
+    greed: 0.5,
+    favResource: 'wood'
+  });
+
+  useEffect(() => {
+    (window as any)._simulation = { species: [], entities: [], civs: [], settlements: [], units: [] };
+  }, []);
+
+  const spawnCiv = () => {
+    const civ = { ...newCiv, id: Math.random().toString(), techLevel: 1, wealth: 0 };
+    setCivList([...civList, civ]);
+    
+    const sim = (window as any)._simulation;
+    if (sim) {
+      sim.civs.push(civ);
+      // Spawn initial settlement
+      sim.settlements.push({
+        id: Math.random().toString(),
+        civId: civ.id,
+        lat: (Math.random() - 0.5) * Math.PI * 0.8, // avoid poles
+        lon: (Math.random() - 0.5) * 2 * Math.PI,
+        population: 10,
+        resources: 50,
+        defense: 10,
+        level: 1
+      });
+    }
+  };
+
+  const spawnSpecies = () => {
+    const sp = { ...newSpecies, id: Math.random().toString() };
+    setSpeciesList([...speciesList, sp]);
+    
+    const sim = (window as any)._simulation;
+    if (sim) {
+      sim.species.push(sp);
+      for (let i = 0; i < 20; i++) {
+        sim.entities.push({
+          id: Math.random().toString(),
+          speciesId: sp.id,
+          lat: (Math.random() - 0.5) * Math.PI,
+          lon: (Math.random() - 0.5) * 2 * Math.PI,
+          health: 1.0,
+          energy: 0.5
+        });
+      }
+    }
+  };
 
   const startAudio = () => {
     if (audioStarted) return;
@@ -100,6 +283,8 @@ export default function App() {
       uniform float u_moisture;
       uniform float u_cloudCover;
       uniform float u_atmosphere;
+      uniform float u_dynamicWeather;
+      uniform float u_showEcosystem;
       
       // View Params
       uniform float u_speed;
@@ -179,7 +364,7 @@ export default function App() {
         return pow(n, 3.0);
       }
 
-      vec3 getTerrainColor(float h, vec3 p, out float roughness) {
+      vec3 getTerrainColor(float h, vec3 p, out float roughness, float currentTemp, float currentMoist) {
         vec3 waterDeep = vec3(0.02, 0.1, 0.3);
         vec3 waterShallow = vec3(0.05, 0.3, 0.5);
         vec3 sand = vec3(0.8, 0.7, 0.5);
@@ -197,7 +382,7 @@ export default function App() {
 
         if (h < u_waterLevel) {
           vec3 wCol = mix(waterDeep, waterShallow, h / u_waterLevel);
-          float freeze = smoothstep(-0.2, -0.6, u_temperature);
+          float freeze = smoothstep(-0.2, -0.6, currentTemp);
           
           if (freeze > 0.0) {
             float iceTex = iceTexture(p);
@@ -213,8 +398,8 @@ export default function App() {
         float l = clamp((h - u_waterLevel) / (1.0 - u_waterLevel), 0.0, 1.0);
         
         float latTemp = 1.0 - abs(p.y);
-        float temp = u_temperature + latTemp * 0.5 - l * 0.8;
-        float moist = u_moisture + (1.0 - abs(p.y)) * 0.3 + l * 0.2;
+        float temp = currentTemp + latTemp * 0.5 - l * 0.8;
+        float moist = currentMoist + (1.0 - abs(p.y)) * 0.3 + l * 0.2;
         
         vec3 color = grass;
         
@@ -229,7 +414,10 @@ export default function App() {
             roughness = 0.9;
           } else if (moist > 0.4) {
             float canopy = canopyTexture(p);
-            color = mix(forest, jungle, canopy);
+            // Vegetation density based on moisture and temp
+            float vegDensity = smoothstep(0.4, 1.0, moist) * smoothstep(0.4, 1.0, temp);
+            vec3 denseJungle = vec3(0.01, 0.1, 0.02);
+            color = mix(forest, mix(jungle, denseJungle, vegDensity), canopy);
             roughness = 0.95;
           } else {
             float dune = duneTexture(p);
@@ -243,7 +431,9 @@ export default function App() {
             roughness = 0.8;
           } else if (moist > 0.3) {
             float canopy = canopyTexture(p * 0.5);
-            color = mix(grass, forest, canopy);
+            float vegDensity = smoothstep(0.3, 0.8, moist);
+            vec3 denseForest = vec3(0.03, 0.2, 0.08);
+            color = mix(grass, mix(forest, denseForest, vegDensity), canopy);
             roughness = 0.9;
           } else {
             color = grass;
@@ -278,6 +468,20 @@ export default function App() {
         vec3 lightDir = normalize(vec3(1.0, 0.5, 1.0));
         vec3 col = vec3(0.0);
 
+        float currentTemp = u_temperature;
+        float currentMoist = u_moisture;
+        float currentCloud = u_cloudCover;
+        
+        if (u_dynamicWeather > 0.5) {
+            currentTemp += sin(u_time * 0.05) * 0.6;
+            currentMoist += cos(u_time * 0.07) * 0.6;
+            currentCloud += sin(u_time * 0.09) * 0.5;
+            
+            currentTemp = clamp(currentTemp, -1.0, 1.0);
+            currentMoist = clamp(currentMoist, -1.0, 1.0);
+            currentCloud = clamp(currentCloud, 0.0, 1.0);
+        }
+
         if (u_projection > 0.5) {
           // --- 2D MAP PROJECTION (Equirectangular) ---
           vec2 mapUV = gl_FragCoord.xy / u_resolution.xy;
@@ -304,7 +508,7 @@ export default function App() {
           
           float h = fbm(pSample * u_terrainScale) * u_elevation;
           float roughness;
-          vec3 albedo = getTerrainColor(h, pSample, roughness);
+          vec3 albedo = getTerrainColor(h, pSample, roughness, currentTemp, currentMoist);
           
           // Normal mapping
           vec2 e = vec2(0.005, 0.0);
@@ -316,18 +520,85 @@ export default function App() {
           vec3 n = normalize(p);
           vec3 tn = normalize(n - bump * roughness);
           
+          // Rain shadow on ground
+          vec3 cSampleGround = p * 1.02 + vec3(u_seed) + u_time * 0.05;
+          float cloudValGround = fbm(cSampleGround);
+          float stormFactor = smoothstep(0.5, 1.0, currentCloud) * smoothstep(0.3, 1.0, currentMoist);
+          
+          if (stormFactor > 0.0) {
+              float rainArea = smoothstep(0.7, 1.0, cloudValGround);
+              albedo = mix(albedo, albedo * 0.5, rainArea * stormFactor);
+              roughness = mix(roughness, 0.2, rainArea * stormFactor);
+          }
+          
           float diff = max(dot(tn, lightDir), 0.0);
           float amb = 0.2; // Higher ambient for map view
           
+          if (u_showEcosystem > 0.5) {
+              if (h >= u_waterLevel) {
+                  // Herds on plains
+                  if (currentTemp > 0.0 && currentMoist > -0.2 && currentMoist < 0.4) {
+                      vec3 herdPos = pSample * 150.0 + vec3(u_time * 0.2, 0.0, u_time * 0.2);
+                      float herds = smoothstep(0.7, 0.8, fbm(herdPos));
+                      albedo = mix(albedo, vec3(0.2, 0.15, 0.1), herds * 0.6);
+                  }
+                  // Birds over forests
+                  if (currentMoist > 0.3) {
+                      vec3 birdPos = pSample * 250.0 + vec3(u_time * 1.5, u_time * 1.0, 0.0);
+                      float birds = smoothstep(0.8, 0.9, fbm(birdPos));
+                      albedo = mix(albedo, vec3(0.1), birds * 0.5);
+                  }
+              } else {
+                  // Marine life
+                  if (h > u_waterLevel - 0.2 && currentTemp > 0.0) {
+                      vec3 fishPos = pSample * 120.0 + vec3(u_time * 0.8, 0.0, u_time * 0.6);
+                      float fish = smoothstep(0.75, 0.85, fbm(fishPos));
+                      albedo = mix(albedo, vec3(0.1, 0.3, 0.4), fish * 0.4);
+                  }
+              }
+          }
+          
           col = albedo * (diff + amb);
           
+          // Bioluminescence on dark side (Map view)
+          vec3 bioColor = vec3(0.0);
+          if (u_showEcosystem > 0.5 && diff < 0.1) {
+              float darkFactor = smoothstep(0.1, 0.0, diff);
+              if (h >= u_waterLevel && currentTemp > 0.0 && currentMoist > 0.2) {
+                  float bio = smoothstep(0.6, 0.8, fbm(pSample * 80.0));
+                  bioColor = vec3(0.1, 0.8, 0.4) * bio * darkFactor;
+              } else if (h < u_waterLevel && currentTemp > 0.2) {
+                  float shoreDist = u_waterLevel - h;
+                  if (shoreDist < 0.05) {
+                      float plankton = smoothstep(0.6, 0.9, fbm(pSample * 100.0 + u_time * 0.2));
+                      bioColor = vec3(0.0, 0.6, 1.0) * plankton * darkFactor * smoothstep(0.05, 0.0, shoreDist);
+                  }
+              }
+          }
+          col += bioColor;
+          
           // Clouds
-          vec3 cSample = p * 1.02 + vec3(u_seed) + u_time * 0.05;
-          float c = fbm(cSample);
-          float cDetail = fbm(cSample * 5.0);
-          c = mix(c, cDetail, 0.3);
-          float cloudAlpha = smoothstep(1.0 - u_cloudCover, 1.0, c);
-          col = mix(col, vec3(1.0), cloudAlpha * 0.9);
+          float cDetail = fbm(cSampleGround * 5.0);
+          float c = mix(cloudValGround, cDetail, 0.3);
+          float cloudAlpha = smoothstep(1.0 - currentCloud, 1.0, c);
+          
+          vec3 cloudCol = vec3(1.0);
+          if (stormFactor > 0.0) {
+              float isStormCloud = smoothstep(0.7, 1.0, c);
+              cloudCol = mix(cloudCol, vec3(0.3, 0.35, 0.4), stormFactor * isStormCloud);
+              
+              float tFlash = floor(u_time * 12.0);
+              vec3 flashCell = floor(p * 10.0 + vec3(tFlash));
+              float flashHash = hash(flashCell);
+              if (flashHash > 0.98) {
+                  cloudCol += vec3(0.8, 0.9, 1.0) * ((flashHash - 0.98) * 50.0) * stormFactor * isStormCloud;
+              }
+          }
+          
+          col = mix(col, cloudCol, cloudAlpha * 0.9);
+          
+          float shadow = smoothstep(1.0 - currentCloud, 1.0, cloudValGround);
+          col *= (1.0 - shadow * 0.5);
           
           col = pow(col, vec3(0.4545));
           gl_FragColor = vec4(col, 1.0);
@@ -363,7 +634,7 @@ export default function App() {
           float h = fbm(pSample * u_terrainScale) * u_elevation;
           
           float roughness;
-          vec3 albedo = getTerrainColor(h, pSample, roughness);
+          vec3 albedo = getTerrainColor(h, pSample, roughness, currentTemp, currentMoist);
           
           vec2 e = vec2(0.005, 0.0);
           float hx = fbm(normalize(pSample + e.xyy) * u_terrainScale) * u_elevation;
@@ -373,8 +644,43 @@ export default function App() {
           
           vec3 tn = normalize(n - bump * roughness);
           
+          // Rain shadow on ground
+          vec3 cSampleGround = pRot * 2.0 + vec3(u_seed) + u_time * 0.05;
+          float cloudValGround = fbm(cSampleGround);
+          float stormFactor = smoothstep(0.5, 1.0, currentCloud) * smoothstep(0.3, 1.0, currentMoist);
+          
+          if (stormFactor > 0.0) {
+              float rainArea = smoothstep(0.7, 1.0, cloudValGround);
+              albedo = mix(albedo, albedo * 0.5, rainArea * stormFactor);
+              roughness = mix(roughness, 0.2, rainArea * stormFactor);
+          }
+          
           float diff = max(dot(tn, lightDir), 0.0);
           float amb = 0.05;
+          
+          if (u_showEcosystem > 0.5) {
+              if (h >= u_waterLevel) {
+                  // Herds on plains
+                  if (currentTemp > 0.0 && currentMoist > -0.2 && currentMoist < 0.4) {
+                      vec3 herdPos = pSample * 150.0 + vec3(u_time * 0.2, 0.0, u_time * 0.2);
+                      float herds = smoothstep(0.7, 0.8, fbm(herdPos));
+                      albedo = mix(albedo, vec3(0.2, 0.15, 0.1), herds * 0.6);
+                  }
+                  // Birds over forests
+                  if (currentMoist > 0.3) {
+                      vec3 birdPos = pSample * 250.0 + vec3(u_time * 1.5, u_time * 1.0, 0.0);
+                      float birds = smoothstep(0.8, 0.9, fbm(birdPos));
+                      albedo = mix(albedo, vec3(0.1), birds * 0.5);
+                  }
+              } else {
+                  // Marine life
+                  if (h > u_waterLevel - 0.2 && currentTemp > 0.0) {
+                      vec3 fishPos = pSample * 120.0 + vec3(u_time * 0.8, 0.0, u_time * 0.6);
+                      float fish = smoothstep(0.75, 0.85, fbm(fishPos));
+                      albedo = mix(albedo, vec3(0.1, 0.3, 0.4), fish * 0.4);
+                  }
+              }
+          }
           
           float spec = 0.0;
           if (roughness < 0.5) {
@@ -383,7 +689,23 @@ export default function App() {
             spec = pow(max(dot(ref, lightDir), 0.0), specPower) * (1.0 - roughness);
           }
           
-          col = albedo * (diff + amb) + spec;
+          // Bioluminescence on dark side
+          vec3 bioColor = vec3(0.0);
+          if (u_showEcosystem > 0.5 && diff < 0.1) {
+              float darkFactor = smoothstep(0.1, 0.0, diff);
+              if (h >= u_waterLevel && currentTemp > 0.0 && currentMoist > 0.2) {
+                  float bio = smoothstep(0.6, 0.8, fbm(pSample * 80.0));
+                  bioColor = vec3(0.1, 0.8, 0.4) * bio * darkFactor;
+              } else if (h < u_waterLevel && currentTemp > 0.2) {
+                  float shoreDist = u_waterLevel - h;
+                  if (shoreDist < 0.05) {
+                      float plankton = smoothstep(0.6, 0.9, fbm(pSample * 100.0 + u_time * 0.2));
+                      bioColor = vec3(0.0, 0.6, 1.0) * plankton * darkFactor * smoothstep(0.05, 0.0, shoreDist);
+                  }
+              }
+          }
+          
+          col = albedo * (diff + amb) + spec + bioColor;
           
           vec2 tc = sphIntersect(ro, rd, vec3(0.0), 1.02);
           if (tc.x > 0.0) {
@@ -392,28 +714,43 @@ export default function App() {
             pcRot.xz *= rot(u_time * u_speed * 0.7);
             
             vec3 cSample = pcRot * 2.0 + vec3(u_seed) + u_time * 0.05;
-            float c = fbm(cSample);
+            float cBase = fbm(cSample);
             float cDetail = fbm(cSample * 5.0);
-            c = mix(c, cDetail, 0.3);
+            float c = mix(cBase, cDetail, 0.3);
             
-            float cloudAlpha = smoothstep(1.0 - u_cloudCover, 1.0, c);
+            float cloudAlpha = smoothstep(1.0 - currentCloud, 1.0, c);
             float cloudDiff = max(dot(normalize(pc), lightDir), 0.0);
             vec3 cloudCol = vec3(1.0) * (cloudDiff + 0.2);
+            
+            if (stormFactor > 0.0) {
+                float isStormCloud = smoothstep(0.7, 1.0, c);
+                cloudCol = mix(cloudCol, vec3(0.25, 0.3, 0.35) * (cloudDiff + 0.1), stormFactor * isStormCloud);
+                
+                float tFlash = floor(u_time * 12.0);
+                vec3 flashCell = floor(pcRot * 10.0 + vec3(tFlash));
+                float flashHash = hash(flashCell);
+                if (flashHash > 0.98) {
+                    cloudCol += vec3(0.8, 0.9, 1.0) * ((flashHash - 0.98) * 50.0) * stormFactor * isStormCloud;
+                }
+            }
+            
             col = mix(col, cloudCol, cloudAlpha * 0.9);
             
-            float shadow = smoothstep(1.0 - u_cloudCover, 1.0, fbm(pRot * 2.0 + vec3(u_seed) + u_time * 0.05));
+            float shadow = smoothstep(1.0 - currentCloud, 1.0, cloudValGround);
             col *= (1.0 - shadow * 0.5);
           }
           
           float atmo = pow(1.0 - max(dot(n, -rd), 0.0), 3.0);
-          vec3 atmoColor = mix(vec3(0.3, 0.6, 1.0), vec3(0.8, 0.4, 0.2), smoothstep(0.5, 1.0, u_temperature));
-          col += atmoColor * atmo * u_atmosphere * diff;
+          float fogDensity = u_atmosphere * (1.0 + currentMoist * 0.5);
+          vec3 atmoColor = mix(vec3(0.3, 0.6, 1.0), vec3(0.8, 0.4, 0.2), smoothstep(0.5, 1.0, currentTemp));
+          atmoColor = mix(atmoColor, vec3(0.5, 0.55, 0.6), stormFactor * 0.5);
+          col += atmoColor * atmo * fogDensity * diff;
         } else {
           vec2 ta = sphIntersect(ro, rd, vec3(0.0), 1.2);
           if (ta.x > 0.0 || ta.y > 0.0) {
             float dist = length(cross(ro, rd));
             float glow = smoothstep(1.2, 1.0, dist);
-            vec3 atmoColor = mix(vec3(0.1, 0.3, 0.6), vec3(0.5, 0.2, 0.1), smoothstep(0.5, 1.0, u_temperature));
+            vec3 atmoColor = mix(vec3(0.1, 0.3, 0.6), vec3(0.5, 0.2, 0.1), smoothstep(0.5, 1.0, currentTemp));
             col += atmoColor * glow * u_atmosphere;
           }
         }
@@ -473,6 +810,8 @@ export default function App() {
       speed: gl.getUniformLocation(program, 'u_speed'),
       zoom: gl.getUniformLocation(program, 'u_zoom'),
       projection: gl.getUniformLocation(program, 'u_projection'),
+      dynamicWeather: gl.getUniformLocation(program, 'u_dynamicWeather'),
+      showEcosystem: gl.getUniformLocation(program, 'u_showEcosystem'),
     };
 
     let isDragging = false;
@@ -561,9 +900,427 @@ export default function App() {
       gl.uniform1f(uniforms.speed, getVal('_shaderSpeed', 0.2));
       gl.uniform1f(uniforms.zoom, getVal('_shaderZoom', 2.0));
       gl.uniform1f(uniforms.projection, getVal('_shaderProjection', 0.0));
+      gl.uniform1f(uniforms.dynamicWeather, getVal('_shaderDynamicWeather', 0.0));
+      gl.uniform1f(uniforms.showEcosystem, getVal('_shaderShowEcosystem', 1.0));
 
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      
+      // --- Overlay Simulation & Drawing ---
+      const overlay = overlayRef.current;
+      if (overlay) {
+        if (overlay.width !== overlay.clientWidth || overlay.height !== overlay.clientHeight) {
+          overlay.width = overlay.clientWidth;
+          overlay.height = overlay.clientHeight;
+        }
+        const ctx = overlay.getContext('2d');
+        if (ctx) {
+          ctx.clearRect(0, 0, overlay.width, overlay.height);
+          
+          const sim = (window as any)._simulation;
+          if (sim) {
+            const timeNow = (Date.now() - startTimeRef.current) * 0.001;
+            const dt = 0.016;
+            
+            const speed = getVal('_shaderSpeed', 0.2);
+            const zoom = getVal('_shaderZoom', 2.0);
+            const yaw = getVal('_shaderYaw', 0);
+            const pitch = getVal('_shaderPitch', 0);
+            const isMap = getVal('_shaderProjection', 0.0) > 0.5;
+            
+            const seed = getVal('_shaderSeed', 0.0);
+            const terrainScale = getVal('_shaderTerrainScale', 1.5);
+            const elevation = getVal('_shaderElevation', 1.0);
+            const waterLevel = getVal('_shaderWaterLevel', 0.45);
+            
+            let currentTemp = getVal('_shaderTemperature', 0.0);
+            let currentMoist = getVal('_shaderMoisture', 0.0);
+            if (getVal('_shaderDynamicWeather', 0.0) > 0.5) {
+              currentTemp += Math.sin(timeNow * 0.05) * 0.6;
+              currentMoist += Math.cos(timeNow * 0.07) * 0.6;
+              currentTemp = Math.max(-1.0, Math.min(1.0, currentTemp));
+              currentMoist = Math.max(-1.0, Math.min(1.0, currentMoist));
+            }
+            
+            if (!getVal('_shaderPaused', false)) {
+              for (let i = sim.entities.length - 1; i >= 0; i--) {
+                let e = sim.entities[i];
+                let sp = sim.species.find((s: any) => s.id === e.speciesId);
+                if (!sp) { sim.entities.splice(i, 1); continue; }
+                
+                let px = Math.cos(e.lat) * Math.sin(e.lon);
+                let py = Math.sin(e.lat);
+                let pz = Math.cos(e.lat) * Math.cos(e.lon);
+                
+                let pSampleX = px + seed;
+                let pSampleY = py + seed * 1.3;
+                let pSampleZ = pz - seed * 0.8;
+                
+                let hVal = fbm(pSampleX * terrainScale, pSampleY * terrainScale, pSampleZ * terrainScale) * elevation;
+                let l = Math.max(0.0, Math.min(1.0, (hVal - waterLevel) / (1.0 - waterLevel)));
+                let latTemp = 1.0 - Math.abs(py);
+                let localTemp = currentTemp + latTemp * 0.5 - l * 0.8;
+                let localMoist = currentMoist + (1.0 - Math.abs(py)) * 0.3 + l * 0.2;
+                
+                let isLand = hVal >= waterLevel;
+                let wrongHabitat = (sp.habitat === 'land' && !isLand) || (sp.habitat === 'ocean' && isLand);
+                
+                let tempDiff = Math.abs(localTemp - sp.prefTemp);
+                let moistDiff = Math.abs(localMoist - sp.prefMoist);
+                let happiness = 1.0 - (tempDiff + moistDiff) * 0.5;
+                if (wrongHabitat) happiness -= 1.0;
+                
+                if (happiness > 0.5) {
+                  e.health = Math.min(1.0, e.health + dt * 0.1);
+                  e.energy += dt * (happiness - 0.5) * 0.5;
+                } else {
+                  e.health -= dt * (0.5 - happiness) * 0.5;
+                }
+                
+                if (e.health <= 0) {
+                  sim.entities.splice(i, 1);
+                  continue;
+                }
+                
+                if (sp.type === 'animal') {
+                  e.lat += (Math.random() - 0.5) * dt * 0.2;
+                  e.lon += (Math.random() - 0.5) * dt * 0.2;
+                  e.lat = Math.max(-Math.PI/2, Math.min(Math.PI/2, e.lat));
+                }
+                
+                if (e.energy > 1.0 && sim.entities.length < 1000) {
+                  e.energy = 0.5;
+                  sim.entities.push({
+                    id: Math.random().toString(),
+                    speciesId: sp.id,
+                    lat: e.lat + (Math.random() - 0.5) * 0.1,
+                    lon: e.lon + (Math.random() - 0.5) * 0.1,
+                    health: 1.0,
+                    energy: 0.5
+                  });
+                }
+              }
+              
+              // --- Civ Simulation ---
+              for (let i = sim.settlements.length - 1; i >= 0; i--) {
+                let s = sim.settlements[i];
+                let civ = sim.civs.find((c: any) => c.id === s.civId);
+                if (!civ) { sim.settlements.splice(i, 1); continue; }
+                
+                // Gather resources
+                s.resources += dt * 5 * s.level;
+                
+                // Grow population
+                if (s.resources > s.population * 2) {
+                  s.population += dt * 2;
+                  s.resources -= dt * 1;
+                }
+                
+                // Level up settlement
+                if (s.population > s.level * 50 && s.resources > s.level * 100) {
+                  s.level++;
+                  s.defense += 10;
+                  civ.techLevel = Math.max(civ.techLevel, Math.floor(s.level / 2) + 1);
+                }
+                
+                // Spawn units (traders/warriors/settlers)
+                if (s.population > 20 && Math.random() < 0.01 * dt) {
+                  let type = 'settler';
+                  if (Math.random() < civ.aggression) type = 'warrior';
+                  else if (Math.random() < civ.greed) type = 'trader';
+                  
+                  s.population -= 5;
+                  sim.units.push({
+                    id: Math.random().toString(),
+                    civId: civ.id,
+                    homeId: s.id,
+                    type: type,
+                    lat: s.lat,
+                    lon: s.lon,
+                    targetLat: s.lat + (Math.random() - 0.5) * 0.5,
+                    targetLon: s.lon + (Math.random() - 0.5) * 0.5,
+                    health: 10 * civ.techLevel,
+                    payload: type === 'trader' ? 20 : 0
+                  });
+                }
+              }
+              
+              for (let i = sim.units.length - 1; i >= 0; i--) {
+                let u = sim.units[i];
+                let civ = sim.civs.find((c: any) => c.id === u.civId);
+                if (!civ) { sim.units.splice(i, 1); continue; }
+                
+                // Move towards target
+                let dLat = u.targetLat - u.lat;
+                let dLon = u.targetLon - u.lon;
+                let dist = Math.sqrt(dLat*dLat + dLon*dLon);
+                
+                let moveSpeed = dt * 0.1 * (civ.techLevel > 2 ? 2 : 1); // Wagons/Ships are faster
+                
+                if (dist > 0.01) {
+                  u.lat += (dLat / dist) * moveSpeed;
+                  u.lon += (dLon / dist) * moveSpeed;
+                } else {
+                  // Reached target
+                  if (u.type === 'settler') {
+                    // Build new settlement
+                    sim.settlements.push({
+                      id: Math.random().toString(),
+                      civId: civ.id,
+                      lat: u.lat,
+                      lon: u.lon,
+                      population: 5,
+                      resources: 10,
+                      defense: 5,
+                      level: 1
+                    });
+                    sim.units.splice(i, 1);
+                    continue;
+                  } else if (u.type === 'trader') {
+                    // Find nearest friendly settlement to trade
+                    let nearest = sim.settlements.find((s: any) => s.civId === civ.id && s.id !== u.homeId);
+                    if (nearest) {
+                      nearest.resources += u.payload;
+                      civ.wealth += u.payload;
+                    }
+                    sim.units.splice(i, 1);
+                    continue;
+                  } else if (u.type === 'warrior') {
+                    // Find nearest enemy settlement
+                    let enemy = sim.settlements.find((s: any) => s.civId !== civ.id);
+                    if (enemy) {
+                      let edLat = enemy.lat - u.lat;
+                      let edLon = enemy.lon - u.lon;
+                      if (Math.sqrt(edLat*edLat + edLon*edLon) < 0.1) {
+                        // Attack
+                        enemy.defense -= 5 * civ.techLevel;
+                        if (enemy.defense <= 0) {
+                          // Destroyed or captured
+                          enemy.civId = civ.id;
+                          enemy.defense = 10;
+                          civ.wealth += enemy.resources;
+                        }
+                        sim.units.splice(i, 1);
+                        continue;
+                      } else {
+                        u.targetLat = enemy.lat;
+                        u.targetLon = enemy.lon;
+                      }
+                    } else {
+                      // Patrol
+                      u.targetLat = u.lat + (Math.random() - 0.5) * 0.5;
+                      u.targetLon = u.lon + (Math.random() - 0.5) * 0.5;
+                    }
+                  }
+                }
+              }
+            }
+            
+            // --- Draw Entities ---
+            for (let e of sim.entities) {
+              let sp = sim.species.find((s: any) => s.id === e.speciesId);
+              if (!sp) continue;
+              
+              let px = Math.cos(e.lat) * Math.sin(e.lon);
+              let py = Math.sin(e.lat);
+              let pz = Math.cos(e.lat) * Math.cos(e.lon);
+              
+              let pos = null;
+              if (!isMap) {
+                let angle = -timeNow * speed * 0.5;
+                let sA = Math.sin(angle), cA = Math.cos(angle);
+                let worldX = px * cA - pz * sA;
+                let worldZ = px * sA + pz * cA;
+                let worldY = py;
+                
+                let ro_x = 0, ro_y = 0, ro_z = zoom;
+                let sP_pos = Math.sin(pitch), cP_pos = Math.cos(pitch);
+                let ro_y1 = ro_y * cP_pos - ro_z * sP_pos;
+                let ro_z1 = ro_y * sP_pos + ro_z * cP_pos;
+                ro_y = ro_y1; ro_z = ro_z1;
+                
+                let sY_pos = Math.sin(yaw), cY_pos = Math.cos(yaw);
+                let ro_x2 = ro_x * cY_pos - ro_z * sY_pos;
+                let ro_z2 = ro_x * sY_pos + ro_z * cY_pos;
+                ro_x = ro_x2; ro_z = ro_z2;
+                
+                let vx = worldX - ro_x;
+                let vy = worldY - ro_y;
+                let vz = worldZ - ro_z;
+                
+                let vx1 = vx * cY_pos - vz * -sY_pos;
+                let vz1 = vx * -sY_pos + vz * cY_pos;
+                vx = vx1; vz = vz1;
+                
+                let vy2 = vy * cP_pos - vz * -sP_pos;
+                let vz2 = vy * -sP_pos + vz * cP_pos;
+                vy = vy2; vz = vz2;
+                
+                if (vz < 0) {
+                  let uvx = vx / -vz;
+                  let uvy = vy / -vz;
+                  let screenX = uvx * overlay.height + 0.5 * overlay.width;
+                  let screenY = uvy * overlay.height + 0.5 * overlay.height;
+                  
+                  let nx = worldX, ny = worldY, nz = worldZ;
+                  let dx = worldX - ro_x, dy = worldY - ro_y, dz = worldZ - ro_z;
+                  let dot = nx * dx + ny * dy + nz * dz;
+                  
+                  if (dot <= 0) {
+                    pos = { x: screenX, y: overlay.height - screenY };
+                  }
+                }
+              } else {
+                let mapUVy = (e.lat - pitch) / Math.PI + 0.5;
+                let lon_unwrapped = e.lon + yaw + timeNow * speed * 0.5;
+                lon_unwrapped = ((lon_unwrapped + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+                let mapUVx = lon_unwrapped / (2 * Math.PI) + 0.5;
+                
+                let screenUVx = (mapUVx - 0.5) * (zoom * 0.5) + 0.5;
+                let screenUVy = (mapUVy - 0.5) * (zoom * 0.5) + 0.5;
+                
+                if (screenUVx >= 0 && screenUVx <= 1 && screenUVy >= 0 && screenUVy <= 1) {
+                  pos = { x: screenUVx * overlay.width, y: overlay.height - (screenUVy * overlay.height) };
+                }
+              }
+              
+              if (pos) {
+                ctx.fillStyle = sp.color;
+                ctx.globalAlpha = e.health;
+                ctx.beginPath();
+                ctx.arc(pos.x, pos.y, sp.type === 'animal' ? 3 : 2, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+              }
+            }
+            
+            // --- Draw Civs ---
+            const getScreenPos = (lat: number, lon: number) => {
+              let px = Math.cos(lat) * Math.sin(lon);
+              let py = Math.sin(lat);
+              let pz = Math.cos(lat) * Math.cos(lon);
+              
+              if (!isMap) {
+                let angle = -timeNow * speed * 0.5;
+                let sA = Math.sin(angle), cA = Math.cos(angle);
+                let worldX = px * cA - pz * sA;
+                let worldZ = px * sA + pz * cA;
+                let worldY = py;
+                
+                let ro_x = 0, ro_y = 0, ro_z = zoom;
+                let sP_pos = Math.sin(pitch), cP_pos = Math.cos(pitch);
+                let ro_y1 = ro_y * cP_pos - ro_z * sP_pos;
+                let ro_z1 = ro_y * sP_pos + ro_z * cP_pos;
+                ro_y = ro_y1; ro_z = ro_z1;
+                
+                let sY_pos = Math.sin(yaw), cY_pos = Math.cos(yaw);
+                let ro_x2 = ro_x * cY_pos - ro_z * sY_pos;
+                let ro_z2 = ro_x * sY_pos + ro_z * cY_pos;
+                ro_x = ro_x2; ro_z = ro_z2;
+                
+                let vx = worldX - ro_x;
+                let vy = worldY - ro_y;
+                let vz = worldZ - ro_z;
+                
+                let vx1 = vx * cY_pos - vz * -sY_pos;
+                let vz1 = vx * -sY_pos + vz * cY_pos;
+                vx = vx1; vz = vz1;
+                
+                let vy2 = vy * cP_pos - vz * -sP_pos;
+                let vz2 = vy * -sP_pos + vz * cP_pos;
+                vy = vy2; vz = vz2;
+                
+                if (vz < 0) {
+                  let uvx = vx / -vz;
+                  let uvy = vy / -vz;
+                  let screenX = uvx * overlay.height + 0.5 * overlay.width;
+                  let screenY = uvy * overlay.height + 0.5 * overlay.height;
+                  
+                  let nx = worldX, ny = worldY, nz = worldZ;
+                  let dx = worldX - ro_x, dy = worldY - ro_y, dz = worldZ - ro_z;
+                  let dot = nx * dx + ny * dy + nz * dz;
+                  
+                  if (dot <= 0) {
+                    return { x: screenX, y: overlay.height - screenY };
+                  }
+                }
+              } else {
+                let mapUVy = (lat - pitch) / Math.PI + 0.5;
+                let lon_unwrapped = lon + yaw + timeNow * speed * 0.5;
+                lon_unwrapped = ((lon_unwrapped + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+                let mapUVx = lon_unwrapped / (2 * Math.PI) + 0.5;
+                
+                let screenUVx = (mapUVx - 0.5) * (zoom * 0.5) + 0.5;
+                let screenUVy = (mapUVy - 0.5) * (zoom * 0.5) + 0.5;
+                
+                if (screenUVx >= 0 && screenUVx <= 1 && screenUVy >= 0 && screenUVy <= 1) {
+                  return { x: screenUVx * overlay.width, y: overlay.height - (screenUVy * overlay.height) };
+                }
+              }
+              return null;
+            };
+
+            for (let s of sim.settlements) {
+              let civ = sim.civs.find((c: any) => c.id === s.civId);
+              if (!civ) continue;
+              let pos = getScreenPos(s.lat, s.lon);
+              if (pos) {
+                ctx.fillStyle = civ.color;
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 1;
+                
+                // Draw city based on level
+                let size = 3 + s.level * 1.5;
+                ctx.beginPath();
+                if (civ.techLevel >= 3) {
+                  // Advanced city (star)
+                  for (let i = 0; i < 5; i++) {
+                    ctx.lineTo(pos.x + Math.cos(i * Math.PI * 0.4) * size, pos.y + Math.sin(i * Math.PI * 0.4) * size);
+                  }
+                } else if (civ.techLevel === 2) {
+                  // Town (square)
+                  ctx.rect(pos.x - size/2, pos.y - size/2, size, size);
+                } else {
+                  // Village (triangle)
+                  ctx.moveTo(pos.x, pos.y - size);
+                  ctx.lineTo(pos.x + size, pos.y + size);
+                  ctx.lineTo(pos.x - size, pos.y + size);
+                }
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+                
+                // Draw defense walls if high defense
+                if (s.defense > 20) {
+                  ctx.strokeStyle = civ.color;
+                  ctx.beginPath();
+                  ctx.arc(pos.x, pos.y, size + 2, 0, Math.PI * 2);
+                  ctx.stroke();
+                }
+              }
+            }
+            
+            for (let u of sim.units) {
+              let civ = sim.civs.find((c: any) => c.id === u.civId);
+              if (!civ) continue;
+              let pos = getScreenPos(u.lat, u.lon);
+              if (pos) {
+                ctx.fillStyle = civ.color;
+                ctx.beginPath();
+                if (u.type === 'warrior') {
+                  ctx.moveTo(pos.x, pos.y - 3); ctx.lineTo(pos.x + 2, pos.y + 2); ctx.lineTo(pos.x - 2, pos.y + 2);
+                } else if (u.type === 'trader') {
+                  ctx.arc(pos.x, pos.y, 2, 0, Math.PI * 2);
+                } else {
+                  ctx.rect(pos.x - 1.5, pos.y - 1.5, 3, 3);
+                }
+                ctx.fill();
+              }
+            }
+          }
+        }
+      }
+
       animationFrameId = requestAnimationFrame(render);
     };
 
@@ -596,6 +1353,8 @@ export default function App() {
     if (s.pitch !== undefined) setPitch(s.pitch);
     if (s.isPaused !== undefined) setIsPaused(s.isPaused);
     if (s.projection !== undefined) setProjection(s.projection);
+    if (s.dynamicWeather !== undefined) setDynamicWeather(s.dynamicWeather);
+    if (s.showEcosystem !== undefined) setShowEcosystem(s.showEcosystem);
     
     setIsCollapsed(true);
   };
@@ -604,32 +1363,37 @@ export default function App() {
     {
       id: 'earth-like',
       name: 'Earth-like',
-      settings: { seed: Math.random() * 100, terrainScale: 1.5, elevation: 1.0, waterLevel: 0.45, temperature: 0.0, moisture: 0.0, cloudCover: 0.5, atmosphere: 1.0, speed: 0.2, zoom: 2.0, yaw: 0, pitch: 0.2, isPaused: false, projection: 'globe' }
+      settings: { seed: Math.random() * 100, terrainScale: 1.5, elevation: 1.0, waterLevel: 0.45, temperature: 0.0, moisture: 0.0, cloudCover: 0.5, atmosphere: 1.0, speed: 0.2, zoom: 2.0, yaw: 0, pitch: 0.2, isPaused: false, projection: 'globe', dynamicWeather: false, showEcosystem: true }
     },
     {
       id: 'ocean',
       name: 'Ocean World',
-      settings: { seed: Math.random() * 100, terrainScale: 1.0, elevation: 0.5, waterLevel: 0.85, temperature: 0.2, moisture: 0.5, cloudCover: 0.7, atmosphere: 1.5, speed: 0.1, zoom: 1.8, yaw: 1.5, pitch: -0.1, isPaused: false, projection: 'globe' }
+      settings: { seed: Math.random() * 100, terrainScale: 1.0, elevation: 0.5, waterLevel: 0.85, temperature: 0.2, moisture: 0.5, cloudCover: 0.7, atmosphere: 1.5, speed: 0.1, zoom: 1.8, yaw: 1.5, pitch: -0.1, isPaused: false, projection: 'globe', dynamicWeather: false, showEcosystem: true }
     },
     {
       id: 'desert',
       name: 'Scorched Desert',
-      settings: { seed: Math.random() * 100, terrainScale: 2.5, elevation: 1.2, waterLevel: 0.05, temperature: 0.8, moisture: -0.8, cloudCover: 0.1, atmosphere: 0.5, speed: 0.3, zoom: 2.2, yaw: 3.14, pitch: 0.5, isPaused: false, projection: 'globe' }
+      settings: { seed: Math.random() * 100, terrainScale: 2.5, elevation: 1.2, waterLevel: 0.05, temperature: 0.8, moisture: -0.8, cloudCover: 0.1, atmosphere: 0.5, speed: 0.3, zoom: 2.2, yaw: 3.14, pitch: 0.5, isPaused: false, projection: 'globe', dynamicWeather: false, showEcosystem: false }
     },
     {
       id: 'ice',
       name: 'Frozen Wasteland',
-      settings: { seed: Math.random() * 100, terrainScale: 3.0, elevation: 1.5, waterLevel: 0.6, temperature: -0.9, moisture: 0.2, cloudCover: 0.8, atmosphere: 1.2, speed: 0.05, zoom: 1.9, yaw: -1.0, pitch: 0.8, isPaused: false, projection: 'globe' }
+      settings: { seed: Math.random() * 100, terrainScale: 3.0, elevation: 1.5, waterLevel: 0.6, temperature: -0.9, moisture: 0.2, cloudCover: 0.8, atmosphere: 1.2, speed: 0.05, zoom: 1.9, yaw: -1.0, pitch: 0.8, isPaused: false, projection: 'globe', dynamicWeather: false, showEcosystem: false }
     },
     {
       id: 'jungle',
       name: 'Primordial Jungle',
-      settings: { seed: Math.random() * 100, terrainScale: 1.2, elevation: 0.8, waterLevel: 0.3, temperature: 0.6, moisture: 0.9, cloudCover: 0.6, atmosphere: 1.8, speed: 0.15, zoom: 2.1, yaw: 0, pitch: 0, isPaused: false, projection: 'globe' }
+      settings: { seed: Math.random() * 100, terrainScale: 1.2, elevation: 0.8, waterLevel: 0.3, temperature: 0.6, moisture: 0.9, cloudCover: 0.6, atmosphere: 1.8, speed: 0.15, zoom: 2.1, yaw: 0, pitch: 0, isPaused: false, projection: 'globe', dynamicWeather: false, showEcosystem: true }
+    },
+    {
+      id: 'storms',
+      name: 'Chaotic Storms',
+      settings: { seed: Math.random() * 100, terrainScale: 1.5, elevation: 1.0, waterLevel: 0.5, temperature: 0.2, moisture: 0.8, cloudCover: 0.8, atmosphere: 1.5, speed: 0.3, zoom: 2.0, yaw: 0, pitch: 0.2, isPaused: false, projection: 'globe', dynamicWeather: true, showEcosystem: true }
     },
     {
       id: 'map-view',
       name: 'Cartographer (Map View)',
-      settings: { seed: Math.random() * 100, terrainScale: 1.5, elevation: 1.0, waterLevel: 0.45, temperature: 0.0, moisture: 0.0, cloudCover: 0.5, atmosphere: 1.0, speed: 0.2, zoom: 1.0, yaw: 0, pitch: 0, isPaused: false, projection: 'map' }
+      settings: { seed: Math.random() * 100, terrainScale: 1.5, elevation: 1.0, waterLevel: 0.45, temperature: 0.0, moisture: 0.0, cloudCover: 0.5, atmosphere: 1.0, speed: 0.2, zoom: 1.0, yaw: 0, pitch: 0, isPaused: false, projection: 'map', dynamicWeather: false, showEcosystem: true }
     }
   ];
 
@@ -640,6 +1404,112 @@ export default function App() {
     link.download = `procedural-world-${projection}-${Date.now()}.png`;
     link.href = dataURL;
     link.click();
+  };
+
+  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!audioStarted) return;
+    
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = rect.bottom - e.clientY;
+    
+    const u_resolution = [rect.width, rect.height];
+    let mapUVx = x / u_resolution[0];
+    let mapUVy = y / u_resolution[1];
+    
+    let time = (Date.now() - startTimeRef.current) * 0.001;
+    
+    let px = 0, py = 0, pz = 0, lat = 0, lon = 0;
+    
+    if (projection === 'map') {
+      mapUVx = (mapUVx - 0.5) / (zoom * 0.5) + 0.5;
+      mapUVy = (mapUVy - 0.5) / (zoom * 0.5) + 0.5;
+      
+      lon = (mapUVx - 0.5) * 2 * Math.PI - yaw - time * speed * 0.5;
+      lat = (mapUVy - 0.5) * Math.PI + pitch;
+      
+      if (lat > Math.PI/2 || lat < -Math.PI/2) {
+        setSelectedRegion(null);
+        return;
+      }
+      
+      px = Math.cos(lat) * Math.sin(lon);
+      py = Math.sin(lat);
+      pz = Math.cos(lat) * Math.cos(lon);
+    } else {
+      let uvx = (x - 0.5 * u_resolution[0]) / u_resolution[1];
+      let uvy = (y - 0.5 * u_resolution[1]) / u_resolution[1];
+      
+      let ro = [0.0, 0.0, zoom];
+      let rd = normalize([uvx, uvy, -1.0]);
+      
+      let sP = Math.sin(pitch), cP = Math.cos(pitch);
+      let ro_y = ro[1]*cP - ro[2]*sP;
+      let ro_z = ro[1]*sP + ro[2]*cP;
+      ro[1] = ro_y; ro[2] = ro_z;
+      
+      let rd_y = rd[1]*cP - rd[2]*sP;
+      let rd_z = rd[1]*sP + rd[2]*cP;
+      rd[1] = rd_y; rd[2] = rd_z;
+      
+      let sY = Math.sin(yaw), cY = Math.cos(yaw);
+      let ro_x = ro[0]*cY - ro[2]*sY;
+      ro_z = ro[0]*sY + ro[2]*cY;
+      ro[0] = ro_x; ro[2] = ro_z;
+      
+      let rd_x = rd[0]*cY - rd[2]*sY;
+      rd_z = rd[0]*sY + rd[2]*cY;
+      rd[0] = rd_x; rd[2] = rd_z;
+      
+      let t = sphIntersect(ro, rd, [0,0,0], 1.0);
+      if (t > 0.0) {
+        let p = [ro[0] + rd[0]*t, ro[1] + rd[1]*t, ro[2] + rd[2]*t];
+        let angle = time * speed * 0.5;
+        let sA = Math.sin(angle), cA = Math.cos(angle);
+        px = p[0]*cA - p[2]*sA;
+        pz = p[0]*sA + p[2]*cA;
+        py = p[1];
+        
+        lat = Math.asin(py);
+        lon = Math.atan2(px, pz);
+      } else {
+        setSelectedRegion(null);
+        return;
+      }
+    }
+    
+    let pSampleX = px + seed;
+    let pSampleY = py + seed * 1.3;
+    let pSampleZ = pz - seed * 0.8;
+    
+    let hVal = fbm(pSampleX * terrainScale, pSampleY * terrainScale, pSampleZ * terrainScale) * elevation;
+    
+    let currentTemp = temperature;
+    let currentMoist = moisture;
+    if (dynamicWeather) {
+      currentTemp += Math.sin(time * 0.05) * 0.6;
+      currentMoist += Math.cos(time * 0.07) * 0.6;
+      currentTemp = Math.max(-1.0, Math.min(1.0, currentTemp));
+      currentMoist = Math.max(-1.0, Math.min(1.0, currentMoist));
+    }
+    
+    let l = Math.max(0.0, Math.min(1.0, (hVal - waterLevel) / (1.0 - waterLevel)));
+    let latTemp = 1.0 - Math.abs(py);
+    let temp = currentTemp + latTemp * 0.5 - l * 0.8;
+    let moist = currentMoist + (1.0 - Math.abs(py)) * 0.3 + l * 0.2;
+    
+    let biome = getBiome(hVal, temp, moist, waterLevel);
+    
+    setSelectedRegion({
+      lat: (lat * 180 / Math.PI).toFixed(2),
+      lon: (lon * 180 / Math.PI).toFixed(2),
+      elevation: hVal < waterLevel ? 'Sea Level' : (l * 8000).toFixed(0) + 'm',
+      temperature: (temp * 30 + 15).toFixed(1) + '°C',
+      moisture: (moist * 50 + 50).toFixed(0) + '%',
+      biome: biome.name,
+      description: biome.description,
+      history: generateHistory(biome.name, seed, px, py, pz)
+    });
   };
 
   useEffect(() => {
@@ -659,11 +1529,14 @@ export default function App() {
     (window as any)._shaderPitch = pitch;
     (window as any)._shaderPaused = isPaused;
     (window as any)._shaderProjection = projection === 'map' ? 1.0 : 0.0;
-  }, [seed, terrainScale, elevation, waterLevel, temperature, moisture, cloudCover, atmosphere, speed, zoom, yaw, pitch, isPaused, projection]);
+    (window as any)._shaderDynamicWeather = dynamicWeather ? 1.0 : 0.0;
+    (window as any)._shaderShowEcosystem = showEcosystem ? 1.0 : 0.0;
+  }, [seed, terrainScale, elevation, waterLevel, temperature, moisture, cloudCover, atmosphere, speed, zoom, yaw, pitch, isPaused, projection, dynamicWeather, showEcosystem]);
 
   return (
     <div className="fixed inset-0 bg-black overflow-hidden">
-      <canvas ref={canvasRef} className="w-full h-full block cursor-move" />
+      <canvas ref={canvasRef} onClick={handleCanvasClick} className="w-full h-full block cursor-crosshair" />
+      <canvas ref={overlayRef} className="absolute inset-0 w-full h-full pointer-events-none" />
       
       <AnimatePresence>
         {!audioStarted && (
@@ -713,7 +1586,7 @@ export default function App() {
               ) : (
                 <motion.div 
                   layoutId="panel"
-                  className="w-full h-full md:w-[340px] md:h-auto bg-black/60 backdrop-blur-xl md:border border-white/10 md:rounded-2xl overflow-hidden flex flex-col"
+                  className="w-full h-full md:w-[340px] md:h-auto bg-black/60 backdrop-blur-xl md:border border-white/10 md:rounded-2xl overflow-hidden flex flex-col pointer-events-auto"
                 >
                   <div className="border-b border-white/10 p-4 flex justify-between items-center bg-black/20">
                     <h2 className="text-white/80 font-mono text-xs uppercase tracking-widest">Generator Controls</h2>
@@ -725,6 +1598,8 @@ export default function App() {
                       { id: 'presets', label: 'Presets' },
                       { id: 'world', label: 'World' },
                       { id: 'climate', label: 'Climate' },
+                      { id: 'life', label: 'Life' },
+                      { id: 'civ', label: 'Civs' },
                       { id: 'view', label: 'View' }
                     ].map(tab => (
                       <button 
@@ -753,6 +1628,19 @@ export default function App() {
 
                     {activeTab === 'world' && (
                       <div className="space-y-5">
+                        <div className="flex items-center justify-between p-3 bg-green-500/10 border border-green-500/20 rounded-xl">
+                          <div>
+                            <span className="block text-[10px] font-mono uppercase text-green-400 mb-1">Ecosystem Layer</span>
+                            <span className="block text-[8px] font-mono text-white/50 max-w-[180px]">Simulates flora density, moving fauna, and bioluminescence based on climate.</span>
+                          </div>
+                          <button 
+                            onClick={() => setShowEcosystem(!showEcosystem)}
+                            className={`px-3 py-1.5 rounded-full font-mono text-[9px] uppercase transition-colors ${showEcosystem ? 'bg-green-500 text-white shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'bg-white/10 text-white/40 hover:bg-white/20'}`}
+                          >
+                            {showEcosystem ? 'Active' : 'Off'}
+                          </button>
+                        </div>
+
                         <div className="space-y-2">
                           <div className="flex justify-between items-center text-[10px] font-mono uppercase">
                             <span className="text-white/40">Seed Offset</span>
@@ -791,24 +1679,228 @@ export default function App() {
 
                     {activeTab === 'climate' && (
                       <div className="space-y-5">
-                        {[
-                          { label: 'Temperature', val: temperature, set: setTemperature, min: -1, max: 1 },
-                          { label: 'Moisture', val: moisture, set: setMoisture, min: -1, max: 1 },
-                          { label: 'Cloud Cover', val: cloudCover, set: setCloudCover, min: 0, max: 1 },
-                          { label: 'Atmosphere Density', val: atmosphere, set: setAtmosphere, min: 0, max: 3 }
-                        ].map(ctrl => (
-                          <div key={ctrl.label} className="space-y-2">
-                            <div className="flex justify-between text-[10px] font-mono uppercase">
-                              <span className="text-white/40">{ctrl.label}</span>
-                              <span className="text-white/80">{ctrl.val.toFixed(2)}</span>
-                            </div>
-                            <input 
-                              type="range" min={ctrl.min} max={ctrl.max} step="0.01" value={ctrl.val}
-                              onChange={(e) => ctrl.set(parseFloat(e.target.value))}
-                              className="w-full h-1 bg-white/10 rounded-full appearance-none accent-white/60"
-                            />
+                        <div className="flex items-center justify-between p-3 bg-blue-500/10 border border-blue-500/20 rounded-xl">
+                          <div>
+                            <span className="block text-[10px] font-mono uppercase text-blue-400 mb-1">Dynamic Weather</span>
+                            <span className="block text-[8px] font-mono text-white/50 max-w-[180px]">Simulates global climate shifts, moving storms, and lightning.</span>
                           </div>
-                        ))}
+                          <button 
+                            onClick={() => setDynamicWeather(!dynamicWeather)}
+                            className={`px-3 py-1.5 rounded-full font-mono text-[9px] uppercase transition-colors ${dynamicWeather ? 'bg-blue-500 text-white shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'bg-white/10 text-white/40 hover:bg-white/20'}`}
+                          >
+                            {dynamicWeather ? 'Active' : 'Off'}
+                          </button>
+                        </div>
+                        
+                        <div className={`space-y-5 transition-opacity duration-500 ${dynamicWeather ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
+                          {[
+                            { label: 'Temperature', val: temperature, set: setTemperature, min: -1, max: 1 },
+                            { label: 'Moisture', val: moisture, set: setMoisture, min: -1, max: 1 },
+                            { label: 'Cloud Cover', val: cloudCover, set: setCloudCover, min: 0, max: 1 },
+                            { label: 'Atmosphere Density', val: atmosphere, set: setAtmosphere, min: 0, max: 3 }
+                          ].map(ctrl => (
+                            <div key={ctrl.label} className="space-y-2">
+                              <div className="flex justify-between text-[10px] font-mono uppercase">
+                                <span className="text-white/40">{ctrl.label}</span>
+                                <span className="text-white/80">{ctrl.val.toFixed(2)}</span>
+                              </div>
+                              <input 
+                                type="range" min={ctrl.min} max={ctrl.max} step="0.01" value={ctrl.val}
+                                onChange={(e) => ctrl.set(parseFloat(e.target.value))}
+                                className="w-full h-1 bg-white/10 rounded-full appearance-none accent-white/60"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {activeTab === 'life' && (
+                      <div className="space-y-6">
+                        <div className="space-y-4">
+                          <h3 className="text-[10px] font-mono uppercase text-white/40 border-b border-white/10 pb-2">Create Species</h3>
+                          
+                          <div className="space-y-3">
+                            <div>
+                              <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Name</label>
+                              <input 
+                                type="text" value={newSpecies.name} onChange={e => setNewSpecies({...newSpecies, name: e.target.value})}
+                                className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs font-mono text-white focus:outline-none focus:border-white/30"
+                              />
+                            </div>
+                            
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Type</label>
+                                <select 
+                                  value={newSpecies.type} onChange={e => setNewSpecies({...newSpecies, type: e.target.value as any})}
+                                  className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs font-mono text-white focus:outline-none focus:border-white/30 appearance-none"
+                                >
+                                  <option value="animal">Animal</option>
+                                  <option value="plant">Plant</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Habitat</label>
+                                <select 
+                                  value={newSpecies.habitat} onChange={e => setNewSpecies({...newSpecies, habitat: e.target.value as any})}
+                                  className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs font-mono text-white focus:outline-none focus:border-white/30 appearance-none"
+                                >
+                                  <option value="land">Land</option>
+                                  <option value="ocean">Ocean</option>
+                                </select>
+                              </div>
+                            </div>
+                            
+                            <div>
+                              <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Color</label>
+                              <input 
+                                type="color" value={newSpecies.color} onChange={e => setNewSpecies({...newSpecies, color: e.target.value})}
+                                className="w-full h-8 bg-transparent rounded-lg cursor-pointer"
+                              />
+                            </div>
+                            
+                            <div className="space-y-2">
+                              <div className="flex justify-between text-[9px] font-mono uppercase">
+                                <span className="text-white/40">Pref Temp</span>
+                                <span className="text-white/80">{newSpecies.prefTemp.toFixed(2)}</span>
+                              </div>
+                              <input 
+                                type="range" min="-1" max="1" step="0.01" value={newSpecies.prefTemp}
+                                onChange={(e) => setNewSpecies({...newSpecies, prefTemp: parseFloat(e.target.value)})}
+                                className="w-full h-1 bg-white/10 rounded-full appearance-none accent-white/60"
+                              />
+                            </div>
+                            
+                            <div className="space-y-2">
+                              <div className="flex justify-between text-[9px] font-mono uppercase">
+                                <span className="text-white/40">Pref Moist</span>
+                                <span className="text-white/80">{newSpecies.prefMoist.toFixed(2)}</span>
+                              </div>
+                              <input 
+                                type="range" min="-1" max="1" step="0.01" value={newSpecies.prefMoist}
+                                onChange={(e) => setNewSpecies({...newSpecies, prefMoist: parseFloat(e.target.value)})}
+                                className="w-full h-1 bg-white/10 rounded-full appearance-none accent-white/60"
+                              />
+                            </div>
+                            
+                            <button 
+                              onClick={spawnSpecies}
+                              className="w-full py-2 bg-white/10 hover:bg-white/20 text-white font-mono text-[10px] uppercase tracking-widest rounded-lg transition-colors"
+                            >
+                              Spawn Species
+                            </button>
+                          </div>
+                        </div>
+                        
+                        {speciesList.length > 0 && (
+                          <div className="space-y-3">
+                            <h3 className="text-[10px] font-mono uppercase text-white/40 border-b border-white/10 pb-2">Active Species</h3>
+                            <div className="space-y-2">
+                              {speciesList.map(sp => (
+                                <div key={sp.id} className="flex items-center justify-between p-2 bg-white/5 rounded-lg border border-white/5">
+                                  <div className="flex items-center space-x-2">
+                                    <div className="w-3 h-3 rounded-full" style={{ backgroundColor: sp.color }} />
+                                    <div>
+                                      <span className="block text-xs font-mono text-white/90">{sp.name}</span>
+                                      <span className="block text-[8px] font-mono text-white/40 uppercase">{sp.type} • {sp.habitat}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {activeTab === 'civ' && (
+                      <div className="space-y-6">
+                        <div className="space-y-4">
+                          <h3 className="text-[10px] font-mono uppercase text-white/40 border-b border-white/10 pb-2">Create Civilization</h3>
+                          
+                          <div className="space-y-3">
+                            <div>
+                              <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Name</label>
+                              <input 
+                                type="text" value={newCiv.name} onChange={e => setNewCiv({...newCiv, name: e.target.value})}
+                                className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs font-mono text-white focus:outline-none focus:border-white/30"
+                              />
+                            </div>
+                            
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Color</label>
+                                <input 
+                                  type="color" value={newCiv.color} onChange={e => setNewCiv({...newCiv, color: e.target.value})}
+                                  className="w-full h-8 bg-transparent rounded-lg cursor-pointer"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Fav Resource</label>
+                                <select 
+                                  value={newCiv.favResource} onChange={e => setNewCiv({...newCiv, favResource: e.target.value})}
+                                  className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs font-mono text-white focus:outline-none focus:border-white/30 appearance-none"
+                                >
+                                  <option value="wood">Wood</option>
+                                  <option value="stone">Stone</option>
+                                  <option value="gold">Gold</option>
+                                  <option value="food">Food</option>
+                                </select>
+                              </div>
+                            </div>
+                            
+                            <div className="space-y-2">
+                              <div className="flex justify-between text-[9px] font-mono uppercase">
+                                <span className="text-white/40">Aggression</span>
+                                <span className="text-white/80">{newCiv.aggression.toFixed(2)}</span>
+                              </div>
+                              <input 
+                                type="range" min="0" max="1" step="0.01" value={newCiv.aggression}
+                                onChange={(e) => setNewCiv({...newCiv, aggression: parseFloat(e.target.value)})}
+                                className="w-full h-1 bg-white/10 rounded-full appearance-none accent-white/60"
+                              />
+                            </div>
+                            
+                            <div className="space-y-2">
+                              <div className="flex justify-between text-[9px] font-mono uppercase">
+                                <span className="text-white/40">Greed (Trade Focus)</span>
+                                <span className="text-white/80">{newCiv.greed.toFixed(2)}</span>
+                              </div>
+                              <input 
+                                type="range" min="0" max="1" step="0.01" value={newCiv.greed}
+                                onChange={(e) => setNewCiv({...newCiv, greed: parseFloat(e.target.value)})}
+                                className="w-full h-1 bg-white/10 rounded-full appearance-none accent-white/60"
+                              />
+                            </div>
+                            
+                            <button 
+                              onClick={spawnCiv}
+                              className="w-full py-2 bg-white/10 hover:bg-white/20 text-white font-mono text-[10px] uppercase tracking-widest rounded-lg transition-colors"
+                            >
+                              Spawn Civilization
+                            </button>
+                          </div>
+                        </div>
+                        
+                        {civList.length > 0 && (
+                          <div className="space-y-3">
+                            <h3 className="text-[10px] font-mono uppercase text-white/40 border-b border-white/10 pb-2">Active Civilizations</h3>
+                            <div className="space-y-2">
+                              {civList.map(civ => (
+                                <div key={civ.id} className="flex items-center justify-between p-2 bg-white/5 rounded-lg border border-white/5">
+                                  <div className="flex items-center space-x-2">
+                                    <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: civ.color }} />
+                                    <div>
+                                      <span className="block text-xs font-mono text-white/90">{civ.name}</span>
+                                      <span className="block text-[8px] font-mono text-white/40 uppercase">Tech Lvl {civ.techLevel} • Wealth: {Math.floor(civ.wealth)}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -876,6 +1968,48 @@ export default function App() {
           )}
         </AnimatePresence>
       </div>
+
+      <AnimatePresence>
+        {selectedRegion && (
+          <motion.div 
+            initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }}
+            className="absolute bottom-6 right-6 w-80 bg-black/60 backdrop-blur-xl border border-white/10 rounded-2xl p-5 shadow-2xl z-40 pointer-events-auto"
+          >
+            <div className="flex justify-between items-start mb-4">
+              <h3 className="text-white font-mono text-sm uppercase tracking-widest text-blue-400">{selectedRegion.biome}</h3>
+              <button onClick={() => setSelectedRegion(null)} className="text-white/40 hover:text-white">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              </button>
+            </div>
+            
+            <p className="text-white/60 text-xs font-mono mb-4 leading-relaxed">{selectedRegion.description}</p>
+            
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <div className="bg-white/5 rounded-lg p-2">
+                <span className="block text-[9px] font-mono text-white/40 uppercase mb-1">Coordinates</span>
+                <span className="block text-xs font-mono text-white/80">{selectedRegion.lat}°, {selectedRegion.lon}°</span>
+              </div>
+              <div className="bg-white/5 rounded-lg p-2">
+                <span className="block text-[9px] font-mono text-white/40 uppercase mb-1">Elevation</span>
+                <span className="block text-xs font-mono text-white/80">{selectedRegion.elevation}</span>
+              </div>
+              <div className="bg-white/5 rounded-lg p-2">
+                <span className="block text-[9px] font-mono text-white/40 uppercase mb-1">Temperature</span>
+                <span className="block text-xs font-mono text-white/80">{selectedRegion.temperature}</span>
+              </div>
+              <div className="bg-white/5 rounded-lg p-2">
+                <span className="block text-[9px] font-mono text-white/40 uppercase mb-1">Moisture</span>
+                <span className="block text-xs font-mono text-white/80">{selectedRegion.moisture}</span>
+              </div>
+            </div>
+            
+            <div className="border-t border-white/10 pt-3">
+              <span className="block text-[9px] font-mono text-blue-400/70 uppercase mb-1">Historical Record</span>
+              <p className="text-white/70 text-xs font-mono italic">"{selectedRegion.history}"</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
