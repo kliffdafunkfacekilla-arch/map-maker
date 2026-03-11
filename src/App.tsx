@@ -153,6 +153,8 @@ export default function App() {
   const [selectedRegion, setSelectedRegion] = useState<any>(null);
   const startTimeRef = useRef(Date.now());
 
+  const [chaosActive, setChaosActive] = useState(false);
+
   const [speciesList, setSpeciesList] = useState<any[]>([]);
   const [civList, setCivList] = useState<any[]>([]);
   
@@ -174,8 +176,22 @@ export default function App() {
   });
 
   useEffect(() => {
-    (window as any)._simulation = { species: [], entities: [], civs: [], settlements: [], units: [] };
+    (window as any)._simulation = { species: [], entities: [], civs: [], settlements: [], units: [], chaosNodes: [], mutants: [] };
   }, []);
+
+  const unleashChaos = () => {
+    if (chaosActive) return;
+    setChaosActive(true);
+    const sim = (window as any)._simulation;
+    sim.chaosNodes = [];
+    for (let i = 0; i < 12; i++) {
+      let a = i * (Math.PI / 6);
+      sim.chaosNodes.push({
+        p: [0, 0, 1], // Start at lat 0, lon 0
+        v: [Math.sin(a), Math.cos(a), 0]
+      });
+    }
+  };
 
   const spawnCiv = () => {
     const civ = { ...newCiv, id: Math.random().toString(), techLevel: 1, wealth: 0 };
@@ -277,6 +293,10 @@ export default function App() {
       uniform float u_terrainScale;
       uniform float u_elevation;
       uniform float u_waterLevel;
+      
+      // Chaos Params
+      uniform float u_chaosActive;
+      uniform vec3 u_chaosPoints[12];
       
       // Climate Params
       uniform float u_temperature;
@@ -575,6 +595,22 @@ export default function App() {
                   }
               }
           }
+          
+          if (u_chaosActive > 0.5) {
+              float minDist = 100.0;
+              for (int i = 0; i < 12; i++) {
+                  float d = distance(p, u_chaosPoints[i]);
+                  minDist = min(minDist, d);
+              }
+              if (minDist < 0.15) {
+                  float chaosIntensity = smoothstep(0.15, 0.0, minDist);
+                  float chaosNoise = fbm(pSample * 20.0 + u_time * 2.0);
+                  vec3 chaosColor = mix(vec3(0.9, 0.1, 0.8), vec3(0.4, 0.0, 1.0), chaosNoise);
+                  albedo = mix(albedo, chaosColor, chaosIntensity * 0.85);
+                  bioColor += chaosColor * chaosIntensity * 2.0;
+              }
+          }
+          
           col += bioColor;
           
           // Clouds
@@ -702,6 +738,21 @@ export default function App() {
                       float plankton = smoothstep(0.6, 0.9, fbm(pSample * 100.0 + u_time * 0.2));
                       bioColor = vec3(0.0, 0.6, 1.0) * plankton * darkFactor * smoothstep(0.05, 0.0, shoreDist);
                   }
+              }
+          }
+          
+          if (u_chaosActive > 0.5) {
+              float minDist = 100.0;
+              for (int i = 0; i < 12; i++) {
+                  float d = distance(pRot, u_chaosPoints[i]);
+                  minDist = min(minDist, d);
+              }
+              if (minDist < 0.15) {
+                  float chaosIntensity = smoothstep(0.15, 0.0, minDist);
+                  float chaosNoise = fbm(pSample * 20.0 + u_time * 2.0);
+                  vec3 chaosColor = mix(vec3(0.9, 0.1, 0.8), vec3(0.4, 0.0, 1.0), chaosNoise);
+                  albedo = mix(albedo, chaosColor, chaosIntensity * 0.85);
+                  bioColor += chaosColor * chaosIntensity * 2.0;
               }
           }
           
@@ -902,6 +953,23 @@ export default function App() {
       gl.uniform1f(uniforms.projection, getVal('_shaderProjection', 0.0));
       gl.uniform1f(uniforms.dynamicWeather, getVal('_shaderDynamicWeather', 0.0));
       gl.uniform1f(uniforms.showEcosystem, getVal('_shaderShowEcosystem', 1.0));
+      
+      const isChaos = getVal('_shaderChaosActive', 0.0) > 0.5;
+      gl.uniform1f(uniforms.chaosActive, isChaos ? 1.0 : 0.0);
+      if (isChaos) {
+        const chaosFlat = new Float32Array(36);
+        const sim = (window as any)._simulation;
+        if (sim && sim.chaosNodes) {
+          for (let i = 0; i < 12; i++) {
+            if (sim.chaosNodes[i]) {
+              chaosFlat[i*3] = sim.chaosNodes[i].p[0];
+              chaosFlat[i*3+1] = sim.chaosNodes[i].p[1];
+              chaosFlat[i*3+2] = sim.chaosNodes[i].p[2];
+            }
+          }
+        }
+        gl.uniform3fv(uniforms.chaosPoints, chaosFlat);
+      }
 
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -943,6 +1011,46 @@ export default function App() {
             }
             
             if (!getVal('_shaderPaused', false)) {
+              // --- Chaos Simulation ---
+              const isChaos = getVal('_shaderChaosActive', 0.0) > 0.5;
+              if (isChaos && sim.chaosNodes) {
+                for (let node of sim.chaosNodes) {
+                  // Meander
+                  let meander = (Math.random() - 0.5) * 0.5;
+                  let cosM = Math.cos(meander);
+                  let sinM = Math.sin(meander);
+                  let crossPV = [
+                    node.p[1]*node.v[2] - node.p[2]*node.v[1],
+                    node.p[2]*node.v[0] - node.p[0]*node.v[2],
+                    node.p[0]*node.v[1] - node.p[1]*node.v[0]
+                  ];
+                  node.v = [
+                    node.v[0]*cosM + crossPV[0]*sinM,
+                    node.v[1]*cosM + crossPV[1]*sinM,
+                    node.v[2]*cosM + crossPV[2]*sinM
+                  ];
+                  let vLen = Math.sqrt(node.v[0]*node.v[0] + node.v[1]*node.v[1] + node.v[2]*node.v[2]);
+                  node.v = [node.v[0]/vLen, node.v[1]/vLen, node.v[2]/vLen];
+
+                  // Move
+                  let moveSpeed = dt * 0.1;
+                  let cosS = Math.cos(moveSpeed);
+                  let sinS = Math.sin(moveSpeed);
+                  let pNew = [
+                    node.p[0]*cosS + node.v[0]*sinS,
+                    node.p[1]*cosS + node.v[1]*sinS,
+                    node.p[2]*cosS + node.v[2]*sinS
+                  ];
+                  let vNew = [
+                    -node.p[0]*sinS + node.v[0]*cosS,
+                    -node.p[1]*sinS + node.v[1]*cosS,
+                    -node.p[2]*sinS + node.v[2]*cosS
+                  ];
+                  node.p = pNew;
+                  node.v = vNew;
+                }
+              }
+
               for (let i = sim.entities.length - 1; i >= 0; i--) {
                 let e = sim.entities[i];
                 let sp = sim.species.find((s: any) => s.id === e.speciesId);
@@ -951,6 +1059,27 @@ export default function App() {
                 let px = Math.cos(e.lat) * Math.sin(e.lon);
                 let py = Math.sin(e.lat);
                 let pz = Math.cos(e.lat) * Math.cos(e.lon);
+                
+                // Chaos Warping
+                if (isChaos && sim.chaosNodes) {
+                  let warped = false;
+                  for (let node of sim.chaosNodes) {
+                    let dx = px - node.p[0], dy = py - node.p[1], dz = pz - node.p[2];
+                    if (dx*dx + dy*dy + dz*dz < 0.02) {
+                      warped = true;
+                      break;
+                    }
+                  }
+                  if (warped) {
+                    sim.entities.splice(i, 1);
+                    sim.mutants.push({
+                      id: Math.random().toString(),
+                      lat: e.lat, lon: e.lon,
+                      health: 5.0
+                    });
+                    continue;
+                  }
+                }
                 
                 let pSampleX = px + seed;
                 let pSampleY = py + seed * 1.3;
@@ -1007,6 +1136,33 @@ export default function App() {
                 let civ = sim.civs.find((c: any) => c.id === s.civId);
                 if (!civ) { sim.settlements.splice(i, 1); continue; }
                 
+                let px = Math.cos(s.lat) * Math.sin(s.lon);
+                let py = Math.sin(s.lat);
+                let pz = Math.cos(s.lat) * Math.cos(s.lon);
+                
+                // Chaos Warping
+                if (isChaos && sim.chaosNodes) {
+                  for (let node of sim.chaosNodes) {
+                    let dx = px - node.p[0], dy = py - node.p[1], dz = pz - node.p[2];
+                    if (dx*dx + dy*dy + dz*dz < 0.04) {
+                      s.defense -= dt * 5;
+                      s.population -= dt * 2;
+                      if (Math.random() < 0.02) {
+                        sim.mutants.push({
+                          id: Math.random().toString(),
+                          lat: s.lat + (Math.random()-0.5)*0.1,
+                          lon: s.lon + (Math.random()-0.5)*0.1,
+                          health: 10.0
+                        });
+                      }
+                    }
+                  }
+                  if (s.population <= 0) {
+                    sim.settlements.splice(i, 1);
+                    continue;
+                  }
+                }
+                
                 // Gather resources
                 s.resources += dt * 5 * s.level;
                 
@@ -1049,6 +1205,31 @@ export default function App() {
                 let u = sim.units[i];
                 let civ = sim.civs.find((c: any) => c.id === u.civId);
                 if (!civ) { sim.units.splice(i, 1); continue; }
+                
+                let px = Math.cos(u.lat) * Math.sin(u.lon);
+                let py = Math.sin(u.lat);
+                let pz = Math.cos(u.lat) * Math.cos(u.lon);
+                
+                // Chaos Warping
+                if (isChaos && sim.chaosNodes) {
+                  let warped = false;
+                  for (let node of sim.chaosNodes) {
+                    let dx = px - node.p[0], dy = py - node.p[1], dz = pz - node.p[2];
+                    if (dx*dx + dy*dy + dz*dz < 0.02) {
+                      warped = true;
+                      break;
+                    }
+                  }
+                  if (warped) {
+                    sim.units.splice(i, 1);
+                    sim.mutants.push({
+                      id: Math.random().toString(),
+                      lat: u.lat, lon: u.lon,
+                      health: 10.0
+                    });
+                    continue;
+                  }
+                }
                 
                 // Move towards target
                 let dLat = u.targetLat - u.lat;
@@ -1112,6 +1293,82 @@ export default function App() {
                       u.targetLon = u.lon + (Math.random() - 0.5) * 0.5;
                     }
                   }
+                }
+              }
+              
+              // --- Mutant Simulation ---
+              if (isChaos && sim.mutants) {
+                for (let i = sim.mutants.length - 1; i >= 0; i--) {
+                  let m = sim.mutants[i];
+                  m.health -= dt * 0.05;
+                  if (m.health <= 0) { sim.mutants.splice(i, 1); continue; }
+                  
+                  let nearestS = null;
+                  let minDist = Infinity;
+                  for (let s of sim.settlements) {
+                    let dLat = s.lat - m.lat;
+                    let dLon = s.lon - m.lon;
+                    let dist = dLat*dLat + dLon*dLon;
+                    if (dist < minDist) { minDist = dist; nearestS = s; }
+                  }
+                  if (nearestS && minDist < 0.5) {
+                    let dLat = nearestS.lat - m.lat;
+                    let dLon = nearestS.lon - m.lon;
+                    let dist = Math.sqrt(minDist);
+                    if (dist < 0.05) {
+                      nearestS.defense -= dt * 10;
+                      nearestS.population -= dt * 5;
+                      m.health += dt * 1;
+                      if (nearestS.defense <= 0 && nearestS.population <= 0) {
+                        sim.settlements = sim.settlements.filter((s:any) => s.id !== nearestS.id);
+                      }
+                    } else {
+                      m.lat += (dLat/dist) * dt * 0.2;
+                      m.lon += (dLon/dist) * dt * 0.2;
+                    }
+                  } else {
+                    m.lat += (Math.random() - 0.5) * dt * 0.5;
+                    m.lon += (Math.random() - 0.5) * dt * 0.5;
+                  }
+                  m.lat = Math.max(-Math.PI/2, Math.min(Math.PI/2, m.lat));
+                }
+              }
+              
+              // --- Mutant Simulation ---
+              if (isChaos && sim.mutants) {
+                for (let i = sim.mutants.length - 1; i >= 0; i--) {
+                  let m = sim.mutants[i];
+                  m.health -= dt * 0.05;
+                  if (m.health <= 0) { sim.mutants.splice(i, 1); continue; }
+                  
+                  let nearestS = null;
+                  let minDist = Infinity;
+                  for (let s of sim.settlements) {
+                    let dLat = s.lat - m.lat;
+                    let dLon = s.lon - m.lon;
+                    let dist = dLat*dLat + dLon*dLon;
+                    if (dist < minDist) { minDist = dist; nearestS = s; }
+                  }
+                  if (nearestS && minDist < 0.5) {
+                    let dLat = nearestS.lat - m.lat;
+                    let dLon = nearestS.lon - m.lon;
+                    let dist = Math.sqrt(minDist);
+                    if (dist < 0.05) {
+                      nearestS.defense -= dt * 10;
+                      nearestS.population -= dt * 5;
+                      m.health += dt * 1;
+                      if (nearestS.defense <= 0 && nearestS.population <= 0) {
+                        sim.settlements = sim.settlements.filter((s:any) => s.id !== nearestS.id);
+                      }
+                    } else {
+                      m.lat += (dLat/dist) * dt * 0.2;
+                      m.lon += (dLon/dist) * dt * 0.2;
+                    }
+                  } else {
+                    m.lat += (Math.random() - 0.5) * dt * 0.5;
+                    m.lon += (Math.random() - 0.5) * dt * 0.5;
+                  }
+                  m.lat = Math.max(-Math.PI/2, Math.min(Math.PI/2, m.lat));
                 }
               }
             }
@@ -1315,6 +1572,39 @@ export default function App() {
                   ctx.rect(pos.x - 1.5, pos.y - 1.5, 3, 3);
                 }
                 ctx.fill();
+              }
+            }
+            
+            // --- Draw Mutants & Chaos Nodes ---
+            if (isChaos && sim.mutants) {
+              for (let m of sim.mutants) {
+                let pos = getScreenPos(m.lat, m.lon);
+                if (pos) {
+                  ctx.fillStyle = '#ff00ff';
+                  ctx.shadowColor = '#ff00ff';
+                  ctx.shadowBlur = 8;
+                  ctx.beginPath();
+                  ctx.arc(pos.x, pos.y, 3 + Math.random(), 0, Math.PI * 2);
+                  ctx.fill();
+                  ctx.shadowBlur = 0;
+                }
+              }
+              
+              if (sim.chaosNodes) {
+                for (let node of sim.chaosNodes) {
+                  let lat = Math.asin(node.p[1]);
+                  let lon = Math.atan2(node.p[0], node.p[2]);
+                  let pos = getScreenPos(lat, lon);
+                  if (pos) {
+                    ctx.fillStyle = '#ffffff';
+                    ctx.shadowColor = '#ff00ff';
+                    ctx.shadowBlur = 15;
+                    ctx.beginPath();
+                    ctx.arc(pos.x, pos.y, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+                  }
+                }
               }
             }
           }
@@ -1531,7 +1821,8 @@ export default function App() {
     (window as any)._shaderProjection = projection === 'map' ? 1.0 : 0.0;
     (window as any)._shaderDynamicWeather = dynamicWeather ? 1.0 : 0.0;
     (window as any)._shaderShowEcosystem = showEcosystem ? 1.0 : 0.0;
-  }, [seed, terrainScale, elevation, waterLevel, temperature, moisture, cloudCover, atmosphere, speed, zoom, yaw, pitch, isPaused, projection, dynamicWeather, showEcosystem]);
+    (window as any)._shaderChaosActive = chaosActive ? 1.0 : 0.0;
+  }, [seed, terrainScale, elevation, waterLevel, temperature, moisture, cloudCover, atmosphere, speed, zoom, yaw, pitch, isPaused, projection, dynamicWeather, showEcosystem, chaosActive]);
 
   return (
     <div className="fixed inset-0 bg-black overflow-hidden">
@@ -1638,6 +1929,19 @@ export default function App() {
                             className={`px-3 py-1.5 rounded-full font-mono text-[9px] uppercase transition-colors ${showEcosystem ? 'bg-green-500 text-white shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'bg-white/10 text-white/40 hover:bg-white/20'}`}
                           >
                             {showEcosystem ? 'Active' : 'Off'}
+                          </button>
+                        </div>
+
+                        <div className="flex items-center justify-between p-3 bg-purple-500/10 border border-purple-500/20 rounded-xl">
+                          <div>
+                            <span className="block text-[10px] font-mono uppercase text-purple-400 mb-1">Magical Chaos Energy</span>
+                            <span className="block text-[8px] font-mono text-white/50 max-w-[180px]">Unleash 12 meandering leylines of corruption that warp life and spawn mutants.</span>
+                          </div>
+                          <button 
+                            onClick={unleashChaos}
+                            className={`px-3 py-1.5 rounded-full font-mono text-[9px] uppercase transition-colors ${chaosActive ? 'bg-purple-500 text-white shadow-[0_0_15px_rgba(168,85,247,0.5)]' : 'bg-white/10 text-white/40 hover:bg-white/20'}`}
+                          >
+                            {chaosActive ? 'Active' : 'Unleash'}
                           </button>
                         </div>
 
